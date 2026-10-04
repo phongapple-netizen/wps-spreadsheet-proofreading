@@ -1,0 +1,15 @@
+<customUI xmlns="http://schemas.microsoft.com/office/2006/01/customui" onLoad="OnAddinLoad">
+  <ribbon startFromScratch="false">
+    <tabs>
+      <tab id="wpsSpreadsheetProofreadingTab" label="WPS 表格校改">
+        <group id="wpsSpreadsheetProofreadingGroup" label="单元格文本校对">
+          <button id="wpsSpreadsheetProofreadingOpenPanel"
+                  label="打开校改面板"
+                  onAction="OnAction"
+                  getEnabled="OnGetEnabled"
+                  size="large" />
+        </group>
+      </tab>
+    </tabs>
+  </ribbon>
+</customUI>
