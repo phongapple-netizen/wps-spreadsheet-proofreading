@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WPS 表格校改</title>
+  <link rel="stylesheet" href="./taskpane.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="header">
+      <div>
+        <h1>WPS 表格校改</h1>
+        <p>校对当前选中的单元格区域</p>
+      </div>
+      <button id="settings-toggle" class="icon-button" type="button" aria-label="设置">⚙</button>
+    </header>
+
+    <section id="main-view">
+      <div class="notice">第一版仅处理文本单元格；公式、纯数字、空单元格会自动跳过。</div>
+      <div id="status" class="status status-idle">请选择连续单元格区域后开始校对。</div>
+      <button id="run" class="button primary" type="button">开始校对选区</button>
+      <div class="summary"><span>校对建议</span><span id="count">0</span></div>
+      <div id="issues" class="issues"></div>
+    </section>
+
+    <section id="settings-view" hidden>
+      <div class="settings-head">
+        <button id="settings-back" class="icon-button" type="button">←</button>
+        <h2>模型设置</h2>
+      </div>
+
+      <label>连接方式
+        <select id="provider">
+          <option value="opencode">OpenCode</option>
+          <option value="openai">OpenAI 兼容接口</option>
+        </select>
+      </label>
+      <label>接口地址
+        <input id="endpoint" type="text" value="http://127.0.0.1:4096">
+      </label>
+      <label>模型
+        <input id="model" type="text" value="opencode/mimo-v2.6-flash-free">
+      </label>
+      <label id="password-row">OpenCode 服务密码（可选）
+        <input id="password" type="password" autocomplete="off">
+      </label>
+      <label id="api-key-row" hidden>API Key
+        <input id="api-key" type="password" autocomplete="off">
+      </label>
+      <button id="test-connection" class="button secondary" type="button">测试连接</button>
+      <div id="connection-status" class="status status-idle">尚未检测</div>
+      <p class="small">首版设置只保存在当前任务窗格会话内，不写入工作簿。</p>
+    </section>
+  </main>
+
+  <script src="../js/util.js"></script>
+  <script src="../js/wps-et-api.js"></script>
+  <script src="../js/model-client.js"></script>
+  <script src="../js/proofreading-core.js"></script>
+  <script src="../js/spreadsheet-integration.js"></script>
+  <script src="../js/taskpane.js"></script>
+</body>
+</html>
