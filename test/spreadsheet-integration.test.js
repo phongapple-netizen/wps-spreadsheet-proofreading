@@ -17,6 +17,7 @@ function createHarness(options = {}) {
   const events = [];
   const prompts = [];
   const readAddresses = [];
+  const writes = [];
   const selection = {
     Areas: { Count: options.areas == null ? 1 : options.areas },
     Rows: { Count: rows },
@@ -39,7 +40,16 @@ function createHarness(options = {}) {
       selectAddress(...args) { root.selected = args; return options.locateResult !== false; },
       writeAddress(...args) {
         root.written = args;
-        return options.writeResult || { ok: true };
+        writes.push(args);
+        const result = options.writeResult || { ok: true };
+        if (result.ok) {
+          const normalized = String(args[0]).replace(/\$/g, "");
+          for (const row of grid) {
+            const target = row.find((item) => item && item.address.replace(/\$/g, "") === normalized);
+            if (target) { target.value = args[2]; break; }
+          }
+        }
+        return result;
       }
     },
     getSpreadsheetModelOptions: () => ({ provider: 'test', model: 'mock' }),
@@ -62,7 +72,7 @@ function createHarness(options = {}) {
   const sandbox = vm.createContext(root);
   vm.runInContext(coreSource, sandbox);
   vm.runInContext(integrationSource, sandbox);
-  return { integration: sandbox.WpsSpreadsheetIntegration, root, events, prompts, readAddresses };
+  return { integration: sandbox.WpsSpreadsheetIntegration, root, events, prompts, readAddresses, writes };
 }
 
 function latest(events, name) { return events.filter((event) => event.name === name).at(-1); }
@@ -139,6 +149,49 @@ test('passes exact original text and captured context to locate and write', asyn
   assert.deepEqual(h.root.selected, ['B2', context]);
   h.integration.apply(issues[0].id);
   assert.deepEqual(h.root.written, ['B2', original, original + '。', context]);
+});
+
+test('correcting and ignoring individual cells leaves the remaining suggestions usable', async () => {
+  const grid = [[cell('B2', '甲原文')], [cell('B3', '乙原文')], [cell('B4', '丙原文')]];
+  const h = createHarness({ grid, responseForRequest(_number, prompt) {
+    const cells = modelCells(prompt);
+    return JSON.stringify({ issues: cells.map((item, index) => ({
+      cell: item.address, original: item.text, suggestion: ['甲修正', '乙修正', '丙修正'][index], type: '用词', reason: '逐条核验'
+    })) });
+  } });
+  await h.integration.run();
+  const [b2, b3, b4] = latest(h.events, 'issues').value;
+  h.integration.apply(b2.id);
+  assert.equal(latest(h.events, 'issues').value.find((issue) => issue.id === b2.id).status, 'applied');
+  assert.deepEqual(h.root.written.slice(0, 3), ['B2', '甲原文', '甲修正']);
+
+  h.integration.apply(b2.id);
+  assert.equal(h.writes.length, 1, 'a corrected issue must not be written again');
+  h.integration.ignore(b3.id);
+  assert.equal(latest(h.events, 'issues').value.find((issue) => issue.id === b3.id).status, 'ignored');
+  h.integration.locate(b4.id);
+  assert.deepEqual(h.root.selected, ['B4', context]);
+  h.integration.apply(b4.id);
+  assert.equal(h.writes.length, 2);
+  assert.deepEqual(h.root.written.slice(0, 3), ['B4', '丙原文', '丙修正']);
+  assert.deepEqual(grid.map((row) => row[0].value), ['甲修正', '乙原文', '丙修正']);
+});
+
+test('a fresh proofreading run sends the cell value after a prior correction', async () => {
+  const grid = [[cell('B2', '原始文本')]];
+  const h = createHarness({ grid, responseForRequest(number, prompt) {
+    const item = modelCells(prompt)[0];
+    return JSON.stringify({ issues: [{ cell: item.address, original: item.text,
+      suggestion: number === 1 ? '修正后的文本' : '最新建议', type: '用词', reason: '检查当前值' }] });
+  } });
+  await h.integration.run();
+  h.integration.apply(latest(h.events, 'issues').value[0].id);
+  assert.equal(grid[0][0].value, '修正后的文本');
+
+  await h.integration.run();
+  assert.equal(h.prompts.length, 2);
+  assert.deepEqual(modelCells(h.prompts[1].prompt).map((item) => [item.address, item.text]), [['B2', '修正后的文本']]);
+  assert.equal(latest(h.events, 'issues').value[0].original, '修正后的文本');
 });
 
 test('write failure preserves the issue as pending', async () => {

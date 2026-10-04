@@ -7,55 +7,47 @@
   <link rel="stylesheet" href="./taskpane.css">
 </head>
 <body>
-  <main class="shell">
-    <header class="header">
-      <div>
-        <h1>WPS 表格校改</h1>
-        <p>校对当前选中的单元格区域</p>
-      </div>
-      <button id="settings-toggle" class="icon-button" type="button" aria-label="设置">⚙</button>
+  <main class="page-shell">
+    <header class="toolbar">
+      <div><h1 class="toolbar-title">WPS 表格校改</h1><p class="subtitle">校对当前连续选区中的文本单元格</p></div>
+      <button id="settings-toggle" class="button button-icon" type="button" aria-label="设置" title="设置" aria-expanded="false" aria-controls="settings-view">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.24 5.35 10.5 4.96 10.35 2.64h3.3l-.15 2.32 1.26.39 1.16.61 1.53-1.74 2.33 2.33-1.74 1.53.61 1.16.39 1.26 2.32-.15v3.3l-2.32-.15-.39 1.26-.61 1.16 1.74 1.53-2.33 2.33-1.53-1.74-1.16.61-1.26.39.15 2.32h-3.3l.15-2.32-1.26-.39-1.16-.61-1.53 1.74-2.33-2.33 1.74-1.53-.61-1.16-.39-1.26-2.32.15v-3.3l2.32.15.39-1.26.61-1.16L4.22 6.55l2.33-2.33 1.53 1.74z"/><circle cx="12" cy="12" r="3"/></svg>
+        <span id="connection-dot" class="connection-dot" aria-hidden="true"></span>
+      </button>
     </header>
 
-    <section id="main-view">
-      <div class="notice">第一版仅处理文本单元格；公式、纯数字、空单元格会自动跳过。</div>
-      <div id="status" class="status status-idle">请选择连续单元格区域后开始校对。</div>
-      <button id="run" class="button primary" type="button">开始校对选区</button>
-      <div class="summary"><span>校对建议</span><span id="count">0</span></div>
-      <div id="issues" class="issues"></div>
+    <section id="main-view" class="main-view">
+      <div class="notice">第一版仅处理文本单元格；公式、纯数字和空单元格会自动跳过。请选择一个连续区域。</div>
+      <div id="status" class="status status-idle" role="status" aria-live="polite">请选择连续单元格区域后开始校对。</div>
+      <button id="run" class="button button-primary run-button" type="button">开始校对选区</button>
+      <div class="summary"><span>校对建议</span><span id="count" class="count-badge">0</span></div>
+      <div id="empty-state" class="empty-state">选择表格中的连续单元格区域，然后开始校对。</div>
+      <div id="issues" class="issue-list" aria-live="polite"></div>
     </section>
 
-    <section id="settings-view" hidden>
-      <div class="settings-head">
-        <button id="settings-back" class="icon-button" type="button">←</button>
-        <h2>模型设置</h2>
-      </div>
-
-      <label>连接方式
-        <select id="provider">
-          <option value="opencode">OpenCode</option>
-          <option value="openai">OpenAI 兼容接口</option>
-        </select>
-      </label>
-      <label>接口地址
-        <input id="endpoint" type="text" value="http://127.0.0.1:4096">
-      </label>
-      <label>模型
-        <input id="model" type="text" value="opencode/mimo-v2.6-flash-free">
-      </label>
-      <label id="password-row">OpenCode 服务密码（可选）
-        <input id="password" type="password" autocomplete="off">
-      </label>
-      <label id="api-key-row" hidden>API Key
-        <input id="api-key" type="password" autocomplete="off">
-      </label>
-      <button id="test-connection" class="button secondary" type="button">测试连接</button>
-      <div id="connection-status" class="status status-idle">尚未检测</div>
-      <p class="small">首版设置只保存在当前任务窗格会话内，不写入工作簿。</p>
+    <section id="settings-view" class="settings-view" hidden aria-labelledby="settings-title">
+      <div class="settings-page-head"><button id="settings-back" class="button button-icon back-button" type="button" aria-label="返回主界面">←</button><h2 id="settings-title">模型设置</h2></div>
+      <div class="connection-card"><span class="connection-indicator" aria-hidden="true">●</span><div><strong id="connection-status" class="connection-status">尚未检测</strong><div id="model-summary" class="field-note">尚未配置模型。</div></div></div>
+      <label class="field-label" for="provider">连接方式</label>
+      <select id="provider" class="field-control"><option value="opencode">OpenCode</option><option value="openai">OpenAI 兼容接口</option></select>
+      <label id="endpoint-label" class="field-label" for="endpoint">OpenCode 服务地址</label>
+      <input id="endpoint" class="field-control" type="url" autocomplete="off" spellcheck="false">
+      <div class="model-label-row"><label class="field-label" for="model-select">模型</label><button id="model-input-toggle" class="button button-text" type="button" aria-pressed="false">手动输入</button></div>
+      <div id="model-select-row"><select id="model-select" class="field-control"><option value="">先检测并读取模型</option></select></div>
+      <div id="model-manual-row" hidden><input id="model" class="field-control" type="text" placeholder="输入 provider/model" autocomplete="off" spellcheck="false"></div>
+      <label id="password-row" class="field-label" for="password">OpenCode 服务密码（可选）</label>
+      <input id="password" class="field-control secret-field" type="password" autocomplete="new-password" placeholder="仅本次会话使用，不会保存">
+      <label id="api-key-label" class="field-label" for="api-key" hidden>API Key</label>
+      <input id="api-key" class="field-control secret-field" type="password" autocomplete="new-password" placeholder="仅本次会话使用，不会保存" hidden>
+      <div class="connection-row"><button id="refresh-models" class="button button-secondary" type="button">检测并读取模型</button><button id="test-connection" class="button button-secondary" type="button">测试连接</button></div>
+      <p id="model-detection-result" class="field-note" role="status" aria-live="polite"></p>
+      <p class="field-note">模型、服务地址及提供商分别保存；密码和 API Key 仅保留在当前会话，且按提供商隔离。</p>
     </section>
   </main>
-
   <script src="../js/util.js"></script>
   <script src="../js/wps-et-api.js"></script>
+  <script src="../js/settings-store.js"></script>
+  <script src="../js/opencode-client.js"></script>
   <script src="../js/model-client.js"></script>
   <script src="../js/proofreading-core.js"></script>
   <script src="../js/spreadsheet-integration.js"></script>

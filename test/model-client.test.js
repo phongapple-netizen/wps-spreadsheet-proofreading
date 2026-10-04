@@ -4,16 +4,19 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 
 const source = fs.readFileSync(require('node:path').join(__dirname, '../js/model-client.js'), 'utf8');
+const openCodeSource = fs.readFileSync(require('node:path').join(__dirname, '../js/opencode-client.js'), 'utf8');
 
-function harness(handler) {
+function harness(handler, historyHandler = () => []) {
   const calls = [];
   const context = { fetch: async (url, options = {}) => {
     const call = { url: String(url), options, body: options.body && JSON.parse(options.body) };
     calls.push(call);
-    const result = await handler(call, calls);
+    const result = options.method === 'GET' && call.url.endsWith('/message')
+      ? { body: await historyHandler(call, calls) } : await handler(call, calls);
     if (result.rawResponse) return result.rawResponse;
     return new Response(JSON.stringify(result.body), { status: result.status || 200, headers: { 'Content-Type': 'application/json' } });
-  }, AbortController, AbortSignal, setTimeout, clearTimeout, btoa: (value) => Buffer.from(value, 'binary').toString('base64') };
+  }, URL, AbortController, AbortSignal, setTimeout, clearTimeout, btoa: (value) => Buffer.from(value, 'binary').toString('base64') };
+  vm.runInNewContext(openCodeSource, context);
   vm.runInNewContext(source, context);
   return { client: context.WpsSpreadsheetModelClient, calls };
 }
@@ -34,7 +37,7 @@ test('OpenCode uses API text-only fields, confirms permission monitoring, and ab
     return { body: true };
   });
   assert.equal(await client.request({ model: 'provider/model', permissionPollMs: 50 }, 'sample'), '{"ok":true}');
-  const message = calls.find((call) => call.url.endsWith('/message'));
+  const message = calls.find((call) => call.url.endsWith('/message') && call.options.method === 'POST');
   assert.deepEqual(message.body.model, { providerID: 'provider', modelID: 'model' });
   assert.equal(message.body.tools.bash, false);
   assert.equal(message.body.tools.read, false);
@@ -87,8 +90,7 @@ test('rejects model IDs without nonempty provider and model components', async (
     });
     await assert.rejects(client.request({ model }, 'sample'), /provider\/model/);
     assert.equal(calls.some((call) => call.url.endsWith('/message')), false);
-    assert.ok(calls.some((call) => call.url.endsWith('/abort')));
-    assert.ok(calls.some((call) => call.options.method === 'DELETE'));
+    assert.equal(calls.length, 0, 'invalid models must be rejected before creating a session');
   }
 });
 
@@ -229,7 +231,7 @@ test('a late monitor HTTP failure prevents accepting a completed message', async
     }
     return { body: true };
   });
-  await assert.rejects(client.request({ model: 'provider/model', timeoutMs: 1000, permissionPollMs: 50 }, 'sample'), /permission monitor unavailable/);
+  await assert.rejects(client.request({ model: 'provider/model', timeoutMs: 1000, permissionPollMs: 50 }, 'sample'), /HTTP 503/);
   assert.ok(calls.some((call) => call.url.endsWith('/abort')));
   assert.ok(calls.some((call) => call.options.method === 'DELETE'));
 });
@@ -259,7 +261,7 @@ test('reports model info errors and never returns partial text', async () => {
     return { body: true };
   });
   await assert.rejects(client.request({ model: 'provider/model', permissionPollMs: 50 }, 'sample'), (error) => {
-    assert.match(error.message, /UnknownError: safe/);
+    assert.match(error.message, /模型调用失败/);
     assert.doesNotMatch(error.message, /sk-/);
     return true;
   });
@@ -299,4 +301,105 @@ test('health check accepts only healthy true', async () => {
   await assert.rejects(unhealthy.client.testConnection({}), /就绪/);
   const healthy = harness(() => ({ body: { healthy: true } }));
   assert.equal(await healthy.client.testConnection({}), true);
+});
+
+test('reuses the Word model catalog parser and adapts provider/model choices for the pane', async () => {
+  const { client, calls } = harness(() => ({ body: {
+    providers: [{ id: 'opencode', models: { 'big-pickle': {}, other: { id: 'other' } } },
+      { id: 'another', models: [{ id: 'text' }, { id: 'text' }] }],
+    default: { opencode: 'big-pickle' }
+  } }));
+  const catalog = await client.fetchModels({ endpoint: 'http://127.0.0.1:4096/' });
+  assert.deepEqual(Array.from(catalog.models, x => x.id), ['another/text', 'opencode/big-pickle', 'opencode/other']);
+  assert.equal(catalog.defaultModel, 'opencode/big-pickle');
+  assert.equal(calls[0].url, 'http://127.0.0.1:4096/config/providers');
+});
+
+test('malformed model catalogs and credential-bearing endpoints are rejected', async () => {
+  const invalidCatalog = harness(() => ({ body: { models: ['untrusted'] } }));
+  await assert.rejects(invalidCatalog.client.fetchModels({}), /模型列表格式无效/);
+  const badEndpoint = harness(() => ({ body: true }));
+  await assert.rejects(badEndpoint.client.request({ model: 'provider/model', endpoint: 'http://user:secret@localhost:4096' }, 'sample'), /不能包含账号或密码/);
+  assert.equal(badEndpoint.calls.length, 0);
+});
+
+function safeHandler(call) {
+  if (call.url.endsWith('/session')) return { body: safeSession };
+  if (call.url.endsWith('/experimental/tool/ids')) return { body: toolIDs };
+  if (call.url.endsWith('/permission')) return { body: [] };
+  if (call.url.endsWith('/message')) return { body: promptResponse };
+  return { body: true };
+}
+
+test('rejects an earlier assistant tool message even when the final response is text only', async () => {
+  let reads = 0;
+  const { client, calls } = harness(safeHandler, () => ++reads === 1 ? [] : [
+    { info: { role: 'assistant' }, parts: [{ type: 'tool', tool: 'read', state: { status: 'error' } }] },
+    { info: { role: 'assistant' }, parts: promptResponse.parts }
+  ]);
+  await assert.rejects(client.request({ model: 'provider/model' }, 'sample'), /调用工具/);
+  assert.ok(calls.some(x => x.url.endsWith('/abort')));
+  assert.ok(calls.some(x => x.options.method === 'DELETE'));
+});
+
+test('a tool observed during generation cannot be erased by a later clean history', async () => {
+  let reads = 0;
+  const { client } = harness(async call => {
+    if (call.url.endsWith('/message')) { await new Promise(resolve => setTimeout(resolve, 130)); return { body: promptResponse }; }
+    return safeHandler(call);
+  }, () => ++reads === 2 ? [{ parts: [{ type: 'tool', tool: 'bash' }] }] : []);
+  await assert.rejects(client.request({ model: 'provider/model', permissionPollMs: 50 }, 'sample'), /调用工具/);
+});
+
+test('an unavailable session history prevents the model request', async () => {
+  const { client, calls } = harness(safeHandler, () => ({ parts: [] }));
+  await assert.rejects(client.request({ model: 'provider/model' }, 'sample'), /会话消息格式无效/);
+  assert.equal(calls.some(x => x.url.endsWith('/message') && x.options.method === 'POST'), false);
+});
+
+test('external cancellation stops a model request while cleanup uses a fresh signal', async () => {
+  const controller = new AbortController();
+  const { client, calls } = harness(call => {
+    if (call.url.endsWith('/message')) return new Promise((resolve, reject) => {
+      setTimeout(() => controller.abort(), 20);
+      call.options.signal.addEventListener('abort', () => reject(new DOMException('cancelled', 'AbortError')), { once: true });
+    });
+    return safeHandler(call);
+  });
+  await assert.rejects(client.request({ model: 'provider/model', signal: controller.signal }, 'sample'), /cancelled/);
+  assert.equal(calls.find(x => x.url.endsWith('/abort')).options.signal.aborted, false);
+  assert.ok(calls.some(x => x.options.method === 'DELETE'));
+});
+
+test('a provider restriction never retries with tools or approval permissions enabled', async () => {
+  const { client, calls } = harness(call => {
+    if (call.url.endsWith('/message')) return { body: { info: { error: { name: 'APIError', data: {
+      statusCode: 403, message: "OpenCode's free tier can only be used from within OpenCode"
+    } } }, parts: [] } };
+    return safeHandler(call);
+  });
+  await assert.rejects(client.request({ model: 'opencode/big-pickle' }, 'sample'), error => error.code === 'MODEL_RESTRICTED');
+  const messages = calls.filter(x => x.options.method === 'POST' && x.url.endsWith('/message'));
+  assert.equal(messages.length, 1);
+  assert.ok(Object.values(messages[0].body.tools).every(value => value === false));
+  assert.equal(calls.find(x => x.url.endsWith('/session')).body.permission[0].action, 'deny');
+});
+
+test('OpenAI-compatible requests offer no tools and reject tool-call responses', async () => {
+  const { client, calls } = harness(() => ({ body: { choices: [{ message: {
+    content: 'discard me', tool_calls: [{ type: 'function', function: { name: 'read' } }]
+  } }] } }));
+  await assert.rejects(client.request({ provider: 'openai', endpoint: 'https://example.test/v1', model: 'text-model' }, 'sample'), /调用工具/);
+  assert.equal(calls[0].body.tools, undefined);
+});
+
+test('HTTP error bodies are never exposed as pane error messages', async () => {
+  for (const status of [401, 500]) {
+    const { client } = harness(() => ({ status, body: { message: 'mock-service-password mock-provider-secret' } }));
+    await assert.rejects(client.testConnection({}), error => {
+      assert.match(error.message, new RegExp('HTTP ' + status));
+      assert.doesNotMatch(error.message, /mock-service-password|mock-provider-secret/);
+      return true;
+    });
+  }
 });

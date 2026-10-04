@@ -30,7 +30,9 @@
 │  ├─ util.js
 │  ├─ wps-et-api.js              # WPS 表格宿主适配层
 │  ├─ ribbon.js
-│  ├─ model-client.js            # OpenCode / OpenAI compatible
+│  ├─ settings-store.js          # 表格版设置、会话凭据和模型目录
+│  ├─ opencode-client.js         # OpenCode HTTP/API helpers
+│  ├─ model-client.js            # OpenCode / OpenAI-compatible adapter
 │  ├─ proofreading-core.js       # 纯逻辑：过滤、分批、Prompt、结果校验
 │  ├─ spreadsheet-integration.js # 选区读取、定位、安全写回
 │  └─ taskpane.js
@@ -38,7 +40,7 @@
 │  ├─ taskpane.html
 │  └─ taskpane.css
 └─ test/
-   └─ proofreading-core.test.js
+   └─ *                            # core、宿主、模型、设置和任务窗格测试
 ```
 
 ## 本地运行
@@ -72,12 +74,14 @@ opencode serve --hostname 127.0.0.1 --port 4096 --cors http://127.0.0.1:3889
 当前模型值按 `provider/model` 形式填写，例如：
 
 ```text
-opencode/mimo-v2.6-flash-free
+opencode/big-pickle
 ```
 
 本轮核验环境为 OpenCode `1.18.34`：`/global/health` 检测健康，创建独立 session，按 `/session/:id/message` 发送文本；最后先确认 abort 成功，再确认删除成功。客户端要求服务回显全部权限 `deny`，并禁用全部工具，发现工具结果或审批请求就中止整轮校对。权限或工具列表无法确认时也会停止。
 
 “连接正常”只表示服务健康，不能证明模型能用。本轮默认免费模型返回服务限制，另外尝试的供应商返回余额不足；真实模型校对尚未成功。请填写本机已连接且可用的 `provider/model`，不要通过放开工具权限来解决供应商错误。
+
+文字版复用说明：表格项目仍独立加载和发布。本轮从本机文字版仓库 `wps-proofreading` 的 `057bc4f` 复制了可独立的 OpenCode URL/凭据处理、模型目录解析和错误映射；任务窗格沿用文字版卡片、状态和设置布局。工作簿/工作表识别、选区读取、单元格定位和写回仍由表格宿主适配层独立实现。未修改文字版仓库。复用边界和本轮 WPS 实测结果见 [首轮验证记录](docs/first-et-host-validation.md)。
 
 ## 首轮真机验收建议
 
