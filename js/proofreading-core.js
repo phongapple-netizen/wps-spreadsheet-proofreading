@@ -5,8 +5,7 @@
 
   function shouldIncludeCell(cell) {
     if (!cell) return false;
-    var formula = text(cell.formula).trim();
-    if (formula.charAt(0) === "=") return false;
+    if (cell.hasFormula || [cell.formula, cell.formulaR1C1].some(function (f) { return text(f).trim().charAt(0) === "="; })) return false;
     if (typeof cell.value !== "string") return false;
     var value = cell.value.trim();
     if (!value) return false;
@@ -15,7 +14,7 @@
   }
 
   function normalizeCell(cell) {
-    return { address: text(cell.address).replace(/\$/g, ""), text: text(cell.value).trim() };
+    return { address: text(cell.address).replace(/\$/g, ""), text: text(cell.value) };
   }
 
   function chunkCells(cells, maxCells, maxChars) {

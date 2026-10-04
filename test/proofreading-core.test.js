@@ -24,3 +24,16 @@ test('parses strict json and rejects mismatched originals', () => {
   const bad = core.parseResponse('{"issues":[{"cell":"B3","original":"别的原文","suggestion":"修改","type":"用词","reason":"x"}]}', source);
   assert.equal(bad.length, 0);
 });
+
+test('keeps whitespace intact from snapshot through model validation', () => {
+  const cells = core.chunkCells([{ address: 'B2', value: '  疏散通到。  ' }])[0];
+  assert.equal(cells[0].text, '  疏散通到。  ');
+  const result = core.parseResponse(JSON.stringify({ issues: [{ cell: 'B2', original: cells[0].text, suggestion: '  疏散通道。  ' }] }), cells);
+  assert.equal(result[0].original, '  疏散通到。  ');
+});
+
+test('excludes either formula representation, booleans and other nontext values', () => {
+  for (const cell of [{ value: '结果', formulaR1C1: '=RC[-1]' }, { value: '结果', hasFormula: true }, { value: true }, { value: {} }, { value: null }]) {
+    assert.equal(core.shouldIncludeCell(cell), false);
+  }
+});

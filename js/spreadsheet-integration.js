@@ -15,20 +15,16 @@
   function selectionSnapshot() {
     var selection = api().getSelection();
     if (!selection) throw new Error("未检测到选中的单元格区域");
-    try {
-      if (selection.Areas && selection.Areas.Count > 1) throw new Error("第一版暂不支持多区域选择，请选择一个连续区域");
-    } catch (error) {
-      if (/暂不支持/.test(error.message || "")) throw error;
-    }
+    var areas = Number(selection.Areas && selection.Areas.Count);
+    if (areas > 1) throw new Error("第一版暂不支持多区域选择，请选择一个连续区域");
+    if (areas !== 1) throw new Error("无法确认选区，请选择一个连续单元格区域");
 
-    var rows = Number(selection.Rows && selection.Rows.Count || 1);
-    var cols = Number(selection.Columns && selection.Columns.Count || 1);
+    var rows = Number(selection.Rows && selection.Rows.Count);
+    var cols = Number(selection.Columns && selection.Columns.Count);
+    if (!Number.isInteger(rows) || !Number.isInteger(cols) || rows < 1 || cols < 1) throw new Error("无法读取选区大小");
     if (rows * cols > 1000) throw new Error("选区超过 1000 个单元格，第一版请缩小范围后再试");
 
-    var sheet = api().getActiveSheet();
-    var sheetName = "";
-    try { sheetName = sheet ? String(sheet.Name || "") : ""; } catch (error) { sheetName = ""; }
-    var workbookKey = api().getWorkbookKey ? api().getWorkbookKey() : "";
+    var context = api().captureContext();
     var cells = [];
     for (var r = 1; r <= rows; r++) {
       for (var c = 1; c <= cols; c++) {
@@ -38,8 +34,7 @@
         }
         var info = api().readCell(cell);
         if (info && core().shouldIncludeCell(info)) {
-          info.sheetName = sheetName;
-          info.workbookKey = workbookKey;
+          info.context = context;
           cells.push(info);
         }
       }
@@ -73,8 +68,7 @@
         var raw = await client().request(options, prompt);
         var parsed = core().parseResponse(raw, batches[i]).map(function (issue) {
           var meta = metadata[issue.address] || {};
-          issue.sheetName = meta.sheetName || "";
-          issue.workbookKey = meta.workbookKey || "";
+          issue.context = meta.context;
           return issue;
         });
         issues = issues.concat(parsed);
@@ -85,6 +79,8 @@
         tone: issues.length ? "success" : "idle"
       });
     } catch (error) {
+      issues = [];
+      emit("setSpreadsheetIssues", []);
       emit("setSpreadsheetStatus", { text: error && error.message ? error.message : String(error), tone: "error" });
     } finally {
       busy = false;
@@ -94,14 +90,16 @@
 
   function locate(id) {
     var issue = issues.find(function (item) { return item.id === id; });
-    if (issue) api().selectAddress(issue.address, issue.sheetName, issue.workbookKey);
+    if (issue && !api().selectAddress(issue.address, issue.context)) {
+      emit("setSpreadsheetStatus", { text: "无法定位原单元格，请返回原工作簿或重新校对。", tone: "error" });
+    }
   }
 
   function apply(id) {
     if (busy) return;
     var issue = issues.find(function (item) { return item.id === id; });
     if (!issue || issue.status !== "pending") return;
-    var result = api().writeAddress(issue.address, issue.original, issue.suggestion, issue.sheetName, issue.workbookKey);
+    var result = api().writeAddress(issue.address, issue.original, issue.suggestion, issue.context);
     if (!result.ok) {
       emit("setSpreadsheetStatus", { text: result.reason || "写入失败", tone: "error" });
       return;

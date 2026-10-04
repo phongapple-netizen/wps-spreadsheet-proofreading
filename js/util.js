@@ -19,4 +19,7 @@
   }
 
   root.WpsSpreadsheetUtil = { text: text, sleep: sleep, escapeHtml: escapeHtml };
+  root.GetUrlPath = function () {
+    return new URL(".", root.location.href).href.replace(/\/$/, "");
+  };
 })(typeof window !== "undefined" ? window : globalThis);

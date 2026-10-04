@@ -35,13 +35,15 @@
   function openTaskPane() {
     var nativeApi = api();
     if (!nativeApi || !nativeApi.createTaskPane) return false;
-    var id = storageGet(STORAGE_KEY) || cachedId;
+    var url = joinUrl(root.GetUrlPath(), TASK_PANE_PATH);
+    var storageKey = STORAGE_KEY + ":" + url;
+    var id = storageGet(storageKey) || cachedId;
     var pane = id && nativeApi.getTaskPane ? nativeApi.getTaskPane(id) : null;
     if (!pane) {
-      pane = nativeApi.createTaskPane(joinUrl(root.GetUrlPath ? root.GetUrlPath() : "", TASK_PANE_PATH));
+      pane = nativeApi.createTaskPane(url);
       if (!pane) return false;
       id = pane.ID || pane.Id || "";
-      if (id) { cachedId = id; storageSet(STORAGE_KEY, id); }
+      if (id) { cachedId = id; storageSet(storageKey, id); }
       return showPane(pane, true);
     }
     cachedId = id;

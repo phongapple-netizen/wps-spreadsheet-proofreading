@@ -34,7 +34,40 @@
   function getWorkbookKey() {
     var workbook = getActiveWorkbook();
     if (!workbook) return "";
-    try { return String(workbook.FullName || workbook.Name || ""); } catch (error) { return ""; }
+    try {
+      var handle = Number(workbook.Windows.Item(1).Hwnd);
+      var name = String(workbook.FullName || "");
+      return handle > 0 && name ? name + "|" + handle : "";
+    } catch (error) { return ""; }
+  }
+
+  function captureContext() {
+    var workbook = getActiveWorkbook();
+    var sheet = getActiveSheet();
+    var key = getWorkbookKey();
+    if (!workbook || !sheet || !key || !sheet.Name) throw new Error("无法确认工作簿和工作表，请重新选择单元格");
+    return { workbook: workbook, sheet: sheet, workbookKey: key, sheetName: String(sheet.Name) };
+  }
+
+  function contextSheet(context) {
+    if (!context || !context.workbookKey || getWorkbookKey() !== context.workbookKey) return null;
+    try {
+      var sheet = context.sheet;
+      var originalName = String(context.workbook.FullName || "");
+      var handle = Number(context.workbook.Windows.Item(1).Hwnd);
+      if (originalName + "|" + handle !== context.workbookKey || String(sheet.Name) !== context.sheetName) return null;
+      if (Number(sheet.Parent.Windows.Item(1).Hwnd) !== handle) return null;
+      return sheet; // Retain the native sheet reference; never resolve a replacement by name.
+    } catch (error) { return null; }
+  }
+
+  function normalizeAddress(address) {
+    var value = String(address || "").toUpperCase();
+    var match = /^\$?([A-Z]{1,3})\$?([1-9]\d{0,6})$/.exec(value);
+    if (!match) return "";
+    var column = 0;
+    for (var i = 0; i < match[1].length; i++) column = column * 26 + match[1].charCodeAt(i) - 64;
+    return column <= 16384 && Number(match[2]) <= 1048576 ? match[1] + match[2] : "";
   }
 
   function getPluginStorage() {
@@ -55,62 +88,58 @@
   }
 
   function readCell(cell) {
-    if (!cell) return null;
-    var value = null;
-    var formula = "";
+    if (!cell) throw new Error("无法读取目标单元格");
+    var value = cell.Value2;
+    var formula;
+    var formulaR1C1;
     var address = "";
-    try { value = cell.Value2; } catch (error) { value = null; }
-    try { formula = cell.FormulaR1C1; } catch (error) {
-      try { formula = cell.Formula; } catch (inner) { formula = ""; }
-    }
+    try { formula = cell.Formula; } catch (error) { /* try R1C1 */ }
+    try { formulaR1C1 = cell.FormulaR1C1; } catch (error) { /* try A1 */ }
+    if (formula === undefined && formulaR1C1 === undefined) throw new Error("无法确认单元格是否为公式，已停止校对");
     try { address = cell.Address(false, false); } catch (error) {
-      try { address = String(cell.Address || ""); } catch (inner) { address = ""; }
+      if (typeof cell.Address === "string") address = cell.Address;
     }
-    return { address: String(address || ""), value: value, formula: formula, cell: cell };
+    address = normalizeAddress(address);
+    if (!address) throw new Error("单元格地址无效，已停止校对");
+    var hasFormula = [formula, formulaR1C1].some(function (f) { return typeof f === "string" && f.trim().charAt(0) === "="; });
+    try { hasFormula = hasFormula || cell.HasFormula === true; } catch (error) { /* both formula properties checked above */ }
+    return { address: address, value: value, formula: formula, formulaR1C1: formulaR1C1, hasFormula: hasFormula };
   }
 
-  function sheetByName(sheetName) {
-    var workbook = getActiveWorkbook();
-    if (!workbook) return null;
-    try { return sheetName ? workbook.Worksheets.Item(sheetName) : getActiveSheet(); }
-    catch (error) { return null; }
-  }
-
-  function selectAddress(address, sheetName, expectedWorkbookKey) {
-    if (expectedWorkbookKey && getWorkbookKey() !== expectedWorkbookKey) return false;
-    var sheet = sheetByName(sheetName);
+  function selectAddress(address, context) {
+    var sheet = contextSheet(context);
+    address = normalizeAddress(address);
     if (!sheet || !address) return false;
     try {
-      if (typeof sheet.Activate === "function") sheet.Activate();
       var range = sheet.Range(address);
+      if (readCell(range).address !== address) return false;
+      if (typeof sheet.Activate !== "function") return false;
+      sheet.Activate();
       if (range && typeof range.Select === "function") range.Select();
       else if (range && typeof range.Activate === "function") range.Activate();
+      else return false;
       return true;
     } catch (error) {
       return false;
     }
   }
 
-  function writeAddress(address, expected, replacement, sheetName, expectedWorkbookKey) {
-    if (expectedWorkbookKey && getWorkbookKey() !== expectedWorkbookKey) {
-      return { ok: false, reason: "当前已切换到其他工作簿，请返回原工作簿后再处理" };
+  function writeAddress(address, expected, replacement, context) {
+    var changed = { ok: false, reason: "单元格内容已变化，请重新校对。" };
+    var sheet = contextSheet(context);
+    address = normalizeAddress(address);
+    if (!sheet || !address) return changed;
+    if (typeof replacement !== "string" || !replacement || /^[\s]*[=+\-@]/.test(replacement)) {
+      return { ok: false, reason: "建议可能被解释为公式，已拒绝写入" };
     }
-    var sheet = sheetByName(sheetName);
-    if (!sheet || !address) return { ok: false, reason: "找不到原工作表" };
     try {
       var range = sheet.Range(address);
-      var current = range.Value2;
-      var formula = range.FormulaR1C1;
-      if (typeof formula === "string" && formula.trim().charAt(0) === "=") {
-        return { ok: false, reason: "公式单元格禁止写入" };
-      }
-      if (String(current == null ? "" : current) !== String(expected == null ? "" : expected)) {
-        return { ok: false, reason: "单元格内容已变化，请重新校对" };
-      }
-      range.Value2 = String(replacement == null ? "" : replacement);
+      var info = readCell(range);
+      if (info.hasFormula || info.address !== address || typeof info.value !== "string" || info.value !== expected || !contextSheet(context)) return changed;
+      range.Value2 = replacement;
       return { ok: true };
     } catch (error) {
-      return { ok: false, reason: "写入失败：" + (error && error.message ? error.message : String(error)) };
+      return changed;
     }
   }
 
@@ -120,6 +149,8 @@
     getActiveWorkbook: getActiveWorkbook,
     getActiveSheet: getActiveSheet,
     getWorkbookKey: getWorkbookKey,
+    captureContext: captureContext,
+    normalizeAddress: normalizeAddress,
     getPluginStorage: getPluginStorage,
     getTaskPane: getTaskPane,
     createTaskPane: createTaskPane,
