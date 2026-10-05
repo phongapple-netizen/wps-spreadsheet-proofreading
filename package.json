@@ -2,16 +2,17 @@
   "name": "wps-spreadsheet-proofreading",
   "version": "0.2.0",
   "private": true,
-  "description": "WPS 表格智能文本校对加载项（实验版）",
+  "description": "WPS 表格智能文本校改加载项",
   "addonType": "et",
   "scripts": {
     "test": "node --test",
     "debug": "node scripts/dev-server.js --port 3892 --register",
     "debug:server": "node scripts/dev-server.js --port 3892",
-    "build": "wpsjs build"
+    "build": "wpsjs build",
+    "build:mac:installer": "bash scripts/build-mac-installer.sh",
+    "build:windows:server": "node scripts/build-windows-server.js",
+    "publish": "wpsjs publish"
   },
-  "devDependencies": {
-    "wps-jsapi": "1.0.5",
-    "wpsjs": "2.2.3"
-  }
+  "devDependencies": {"wps-jsapi":"1.0.5","wpsjs":"2.2.3"},
+  "overrides": {"tmp":"0.2.7"}
 }
