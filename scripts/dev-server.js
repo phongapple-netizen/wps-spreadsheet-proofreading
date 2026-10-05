@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const manager = require('./opencode-manager');
+const { createProxy } = require('./opencode-proxy');
 const projectPackage = require('../package.json');
 
 const ROOT = path.resolve(__dirname, '..');
@@ -120,7 +121,7 @@ function serveFile(req, res, pathname) {
   });
 }
 
-function createHandler() { return async function (req, res) {
+function createHandler(options = {}) { const proxy = createProxy(options.upstream); return async function (req, res) {
   let parsed;
   try { parsed = new URL(req.url, 'http://127.0.0.1'); } catch (_) { return send(res, 400, 'Bad request'); }
   if (parsed.pathname === '/api/opencode/start') {
@@ -133,6 +134,10 @@ function createHandler() { return async function (req, res) {
       catch (error) { send(res, 503, JSON.stringify({ ok: false, error: error.message })); }
     });
     return;
+  }
+  if (parsed.pathname.startsWith('/api/opencode/')) {
+    if (!requestIsLocal(req)) return send(res, 403, JSON.stringify({ error: 'Local same-origin request required' }));
+    return proxy(req, res, parsed, send);
   }
   if (parsed.pathname.startsWith('/api/')) return send(res, 404, JSON.stringify({ ok: false, error: 'Not found' }));
   if (req.method !== 'GET' && req.method !== 'HEAD') return send(res, 405, 'Method not allowed', 'text/plain; charset=utf-8');

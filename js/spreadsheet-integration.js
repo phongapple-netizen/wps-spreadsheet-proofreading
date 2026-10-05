@@ -126,7 +126,7 @@
   }
   function modelOptions() {
     return typeof root.getSpreadsheetModelOptions === "function" ? root.getSpreadsheetModelOptions() :
-      { provider: "opencode", endpoint: "http://127.0.0.1:4097", model: "opencode/mimo-v2.6-flash-free" };
+      { provider: "opencode", endpoint: "http://127.0.0.1:4096", model: "opencode/mimo-v2.6-flash-free" };
   }
   function runOptions(options) {
     var defaults = typeof root.getSpreadsheetRunOptions === "function" ? root.getSpreadsheetRunOptions() : {};

@@ -90,7 +90,7 @@ test('OpenCode model discovery handles object providers, model arrays, and provi
   assert.equal(result.defaultModel,'anthropic/claude-3');
 });
 
-test('ensureService starts only the local OpenCode 4097 service', async t => {
+test('ensureService starts only the local OpenCode 4096 service', async t => {
   const oldFetch = global.fetch;
   const oldLocation = global.location;
   t.after(() => { global.fetch = oldFetch; if (oldLocation === undefined) delete global.location; else global.location = oldLocation; });
@@ -102,7 +102,7 @@ test('ensureService starts only the local OpenCode 4097 service', async t => {
     if (url.endsWith('/global/health') || url.endsWith('/api/health')) return response(calls.filter(x=>x.url.endsWith('/global/health')).length > 1 ? {healthy:true} : {healthy:false});
     return response({healthy:true});
   };
-  assert.equal(await client.ensureService({provider:'opencode',endpoint:'http://127.0.0.1:4097'}),true);
+  assert.equal(await client.ensureService({provider:'opencode',endpoint:'http://127.0.0.1:4096'}),true);
   assert.ok(calls.some(x=>x.url==='http://127.0.0.1:3892/api/opencode/start'));
   calls.length=0;
   await assert.rejects(client.ensureService({provider:'opencode',endpoint:'http://127.0.0.1:4999'}), /健康状态/);
@@ -116,11 +116,11 @@ test('ensureService does not start after cancellation or authentication failure'
   global.location={origin:'http://127.0.0.1:3892'};
   const calls=[];
   global.fetch=async (url)=>{calls.push(url);return response({message:'denied'},401);};
-  await assert.rejects(client.ensureService({provider:'opencode',endpoint:'http://127.0.0.1:4097'}),e=>e.status===401);
+  await assert.rejects(client.ensureService({provider:'opencode',endpoint:'http://127.0.0.1:4096'}),e=>e.status===401);
   assert.ok(!calls.some(url=>url.endsWith('/api/opencode/start')));
   calls.length=0;
   const controller=new AbortController();controller.abort();
-  await assert.rejects(client.ensureService({provider:'opencode',endpoint:'http://127.0.0.1:4097',signal:controller.signal}),e=>e.name==='AbortError');
+  await assert.rejects(client.ensureService({provider:'opencode',endpoint:'http://127.0.0.1:4096',signal:controller.signal}),e=>e.name==='AbortError');
   assert.equal(calls.length,0);
 });
 
@@ -280,4 +280,27 @@ test('OpenCode tool approval aborts model work and removes session', async t => 
   };
   await assert.rejects(client.request({ endpoint: 'http://opencode', model: 'provider/model', timeoutMs: 1000 }, 'x'), /尝试调用工具/);
   assert.ok(calls.some(([url, method]) => url.endsWith('/session/s1') && method === 'DELETE'));
+});
+
+test('local 4096 requests route through same-origin proxy with one panel identity', async t => {
+  const oldFetch=global.fetch, oldLocation=global.location;
+  t.after(()=>{global.fetch=oldFetch; if(oldLocation===undefined)delete global.location;else global.location=oldLocation;});
+  global.location={origin:'http://127.0.0.1:3892'};
+  const calls=[];
+  global.fetch=async(url,init)=>{
+    calls.push({url,init});
+    if(url.endsWith('/session'))return response(openCodeSession());
+    if(url.endsWith('/message'))return response({parts:[{type:'text',text:'{"issues":[]}'}]});
+    return response({healthy:true,version:'1.18.34'});
+  };
+  await client.testConnection({endpoint:'http://127.0.0.1:4096',password:'pw'});
+  await client.request({endpoint:'http://127.0.0.1:4096',model:'provider/model',password:'pw'},'B2 文本');
+  assert.ok(calls.every(c=>c.url.startsWith('http://127.0.0.1:3892/api/opencode/')));
+  assert.match(calls[0].init.headers['X-WPS-Client'],/^[a-f0-9]{32}$/);
+  assert.ok(calls.every(c=>c.init.headers['X-WPS-Client']===calls[0].init.headers['X-WPS-Client']));
+  assert.ok(calls.every(c=>c.init.headers.Authorization===calls[0].init.headers.Authorization));
+  calls.length=0;
+  await client.testConnection({endpoint:'http://127.0.0.1:4097'});
+  assert.equal(calls[0].url,'http://127.0.0.1:4097/global/health');
+  assert.equal(calls[0].init.headers['X-WPS-Client'],undefined);
 });

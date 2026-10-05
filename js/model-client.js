@@ -4,6 +4,23 @@
   var REQUEST_TIMEOUT_MS = 120000;
   var HEALTH_TIMEOUT_MS = 10000;
   var CLEANUP_TIMEOUT_MS = 1000;
+  var proxyClient = null;
+
+  function proxyRequest(url, options) {
+    var target = new URL(url), origin = root.location && root.location.origin;
+    if (target.protocol !== 'http:' || target.port !== '4096' || target.pathname.indexOf('//') >= 0 ||
+        ['127.0.0.1', 'localhost', '[::1]'].indexOf(target.hostname) < 0 || !origin) return { url: url, options: options };
+    var page = new URL(origin);
+    if (page.protocol !== 'http:' || ['127.0.0.1', 'localhost', '[::1]'].indexOf(page.hostname) < 0) throw new Error('共享 OpenCode 只能通过本机任务窗格访问');
+    if (!proxyClient) {
+      var bytes = new Uint8Array(16);
+      if (!root.crypto || !root.crypto.getRandomValues) throw new Error('当前宿主不支持安全会话标识，请更新 WPS');
+      root.crypto.getRandomValues(bytes);
+      proxyClient = Array.from(bytes).map(function (value) { return value.toString(16).padStart(2, '0'); }).join('');
+    }
+    return { url: origin + '/api/opencode' + target.pathname + target.search,
+      options: Object.assign({}, options, { headers: Object.assign({}, options.headers, { 'X-WPS-Client': proxyClient }) }) };
+  }
 
   function trimSlash(value) { return String(value || "").replace(/\/+$/, ""); }
   function endpointUrl(value) {
@@ -39,7 +56,8 @@
     var task = Promise.resolve().then(function () {
       if (settled || (controller && controller.signal.aborted)) throw abortError();
       var init = Object.assign({}, options, { signal: controller ? controller.signal : externalSignal });
-      return fetch(url, init);
+      var routed = proxyRequest(url, init);
+      return fetch(routed.url, routed.options);
     }).then(async function (response) {
       var raw = await response.text();
       return { response: response, raw: raw };
@@ -111,7 +129,7 @@
   }
 
   async function requestOpenCode(options, prompt) {
-    var endpoint = endpointUrl(options.endpoint || "http://127.0.0.1:4097");
+    var endpoint = endpointUrl(options.endpoint || "http://127.0.0.1:4096");
     var model = requireModel(options.model);
     var headers = Object.assign({ "Content-Type": "application/json" }, authHeaders(options.password));
     var permissionRule = [{ permission: "*", pattern: "*", action: "ask" }];
@@ -239,18 +257,18 @@
     return requestOpenCode(options, prompt);
   }
 
-  function isLoopback4097(value) {
+  function isLoopback4096(value) {
     try {
       var parsed = new URL(value);
-      return /^https?:$/.test(parsed.protocol) && ["127.0.0.1", "localhost", "[::1]", "::1"].indexOf(parsed.hostname) >= 0 && parsed.port === "4097";
+      return /^https?:$/.test(parsed.protocol) && ["127.0.0.1", "localhost", "[::1]", "::1"].indexOf(parsed.hostname) >= 0 && parsed.port === "4096";
     } catch (error) { return false; }
   }
 
   async function ensureService(options) {
     options = options || {};
     if (options.provider !== "opencode") return true;
-    var endpoint = endpointUrl(options.endpoint || "http://127.0.0.1:4097");
-    if (!isLoopback4097(endpoint)) return testConnection(options);
+    var endpoint = endpointUrl(options.endpoint || "http://127.0.0.1:4096");
+    if (!isLoopback4096(endpoint)) return testConnection(options);
     try { return await testConnection(Object.assign({}, options, { timeoutMs: options.timeoutMs || HEALTH_TIMEOUT_MS })); }
     catch (healthError) {
       if (options.signal && options.signal.aborted || healthError && healthError.name === "AbortError") throw healthError;
@@ -268,7 +286,7 @@
   async function fetchModels(options) {
     options = options || {};
     var provider = options.provider || "opencode";
-    var endpoint = endpointUrl(options.endpoint || (provider === "opencode" ? "http://127.0.0.1:4097" : ""));
+    var endpoint = endpointUrl(options.endpoint || (provider === "opencode" ? "http://127.0.0.1:4096" : ""));
     var data;
     if (provider === "ollama") {
       endpoint = endpoint.replace(/\/api\/chat$/i, "");
@@ -349,7 +367,7 @@
       await requestOllama(Object.assign({}, options, { timeoutMs: options.timeoutMs || HEALTH_TIMEOUT_MS }), "请仅回复：连接成功");
       return true;
     }
-    var endpoint = endpointUrl(options.endpoint || "http://127.0.0.1:4097");
+    var endpoint = endpointUrl(options.endpoint || "http://127.0.0.1:4096");
     var headers = Object.assign({ "Content-Type": "application/json" }, authHeaders(options.password));
     var paths = ["/global/health", "/api/health"];
     var last = null;
