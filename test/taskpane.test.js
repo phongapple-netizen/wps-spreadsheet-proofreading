@@ -48,6 +48,7 @@ function makeRuntime(options = {}) {
   elements["model-suggestions"].value = "";
   elements["model-manual-row"].hidden = true;
   elements["model-select-row"].hidden = false;
+  elements["scope-confirmation"].hidden = true;
   elements["main-view"].hidden = false;
   elements["settings-popover"].hidden = true;
   elements["opencode-service-state"].hidden = false;
@@ -88,9 +89,17 @@ function makeRuntime(options = {}) {
     }
   };
   const localStorage = { getItem(key) { return key === "test-settings" ? JSON.stringify(profileStore) : null; } };
-  const calls = [];
+  const calls = [], scopeConfirmationRequests = [];
+  let scopeConfirmationHandler = null;
   const integration = {
-    run: options => calls.push(["run", options]), cancel: () => calls.push(["cancel"]), applyAll: () => calls.push(["all"]),
+    run: options => {
+      calls.push(["run", options]);
+      if (options && !options.rulesOnly && options.scope !== "selection" && scopeConfirmationHandler) {
+        scopeConfirmationRequests.push(scopeConfirmationHandler({ scope: options.scope, sheetCount: options.scope === "workbook" ? 2 : 1, cellCount: 3, characterCount: 24 }));
+      }
+    },
+    setScopeConfirmationHandler: handler => { scopeConfirmationHandler = typeof handler === "function" ? handler : null; },
+    cancel: () => calls.push(["cancel"]), applyAll: () => calls.push(["all"]),
     apply: id => calls.push(["apply", id]), ignore: id => calls.push(["ignore", id]), locate: id => calls.push(["locate", id]),
     undo: id => calls.push(["undo", id]), testConnection: opts => calls.push(["testConnection", opts]),
     runRewrite: opts => calls.push(["runRewrite", opts]), applyRewrite: opts => calls.push(["applyRewrite", opts]),
@@ -113,7 +122,7 @@ function makeRuntime(options = {}) {
   };
   const context = vm.createContext(root);
   vm.runInContext(source, context, { filename: "taskpane.js" });
-  return { root, context, elements, calls, profileStore, downloads };
+  return { root, context, elements, calls, profileStore, downloads, scopeConfirmationRequests };
 }
 
 function click(el) { el.dispatch("click"); }
@@ -335,18 +344,18 @@ test("scope segment controls stay disabled while proofreading is running", () =>
   for (const id of ["scope-selection", "scope-sheet", "scope-workbook"]) assert.equal(elements[id].disabled, false);
 });
 
-test("worksheet and workbook AI runs show an inline confirmation before invoking the integration", () => {
-  const { elements, calls } = makeRuntime();
+test("worksheet and workbook AI runs delegate one inline confirmation to the integration", async () => {
+  const { elements, calls, scopeConfirmationRequests } = makeRuntime();
   elements["scope-sheet"].dispatch("click");
   click(elements["run-proofreading"]);
   assert.equal(elements["scope-confirmation"].hidden, false);
   assert.equal(elements["scope-confirmation-title"].textContent, "确认校对当前工作表");
   assert.match(elements["scope-confirmation-message"].textContent, /公式、数字和空单元格会自动跳过/);
-  assert.equal(calls.some(call => call[0] === "run"), false);
+  assert.match(elements["scope-confirmation-message"].textContent, /3 个单元格，共 24 个字符/);
+  assert.equal(calls.filter(call => call[0] === "run").length, 1);
   click(elements["confirm-scope-run"]);
   assert.equal(elements["scope-confirmation"].hidden, true);
-  assert.equal(calls.at(-1)[0], "run");
-  assert.equal(calls.at(-1)[1].scope, "sheet");
+  assert.equal(await scopeConfirmationRequests[0], true);
 
   elements["scope-workbook"].dispatch("click");
   click(elements["rerun-proofreading"]);
@@ -354,8 +363,9 @@ test("worksheet and workbook AI runs show an inline confirmation before invoking
   assert.match(elements["scope-confirmation-message"].textContent, /敏感内容/);
   click(elements["cancel-scope-run"]);
   assert.equal(elements["scope-confirmation"].hidden, true);
+  assert.equal(await scopeConfirmationRequests[1], false);
   assert.equal(elements["proofreading-status"].textContent, "已取消校对");
-  assert.equal(calls.filter(call => call[0] === "run").length, 1);
+  assert.equal(calls.filter(call => call[0] === "run").length, 2);
 });
 
 test("selection AI and rules-only runs do not add an inline scope confirmation", () => {
@@ -369,6 +379,32 @@ test("selection AI and rules-only runs do not add an inline scope confirmation",
   assert.equal(elements["scope-confirmation"].hidden, true);
   assert.equal(calls.at(-1)[1].rulesOnly, true);
   assert.equal(calls.at(-1)[1].scope, "sheet");
+});
+
+test("canceling a run while scope confirmation is open denies the pending request", async () => {
+  const { elements, calls, scopeConfirmationRequests } = makeRuntime();
+  elements["scope-sheet"].dispatch("click");
+  click(elements["run-proofreading"]);
+  assert.equal(elements["scope-confirmation"].hidden, false);
+  click(elements["cancel-proofreading"]);
+  assert.equal(await scopeConfirmationRequests[0], false);
+  assert.equal(elements["scope-confirmation"].hidden, true);
+  assert.deepEqual(calls.at(-1), ["cancel"]);
+});
+
+test("issue card rendering ignores circular WPS workbook and worksheet context objects", () => {
+  const { root, elements } = makeRuntime();
+  const workbook = { Worksheets: {} }, sheet = { Parent: workbook };
+  workbook.ActiveSheet = sheet; workbook.Worksheets.ActiveSheet = sheet;
+  const context = { workbook, sheet }; context.self = context;
+  const issue = { id: "host-issue", address: "B5", sheetName: "Data", original: "旧文", suggestion: "建议一", reason: "原因", status: "pending", context };
+  root.setSpreadsheetIssues([issue]);
+  const card = elements["pending-issues"].children[0];
+  assert.match(card.innerHTML, /建议一/);
+  const nextWorkbook = {}, nextSheet = { Parent: nextWorkbook }; nextWorkbook.ActiveSheet = nextSheet;
+  root.setSpreadsheetIssues([Object.assign({}, issue, { suggestion: "建议二", context: { workbook: nextWorkbook, sheet: nextSheet } })]);
+  assert.equal(elements["pending-issues"].children[0], card);
+  assert.match(card.innerHTML, /建议二/);
 });
 
 test("applied, ignored, and reverted issues are tucked into the processed group while stale stays actionable", () => {

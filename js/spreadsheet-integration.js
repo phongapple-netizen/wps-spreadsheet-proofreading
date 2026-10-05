@@ -2,7 +2,7 @@
   "use strict";
 
   var issues = [], history = [], timing = [];
-  var activeRun = null, connectionBusy = false, rewriteState = null;
+  var activeRun = null, connectionBusy = false, rewriteState = null, scopeConfirmationHandler = null;
   var sequence = 0, lastOptions = null;
   var MAX_CELLS = 20000, MAX_CHARACTERS = 50000;
   function api() { return root.WpsSpreadsheet; }
@@ -95,12 +95,7 @@
   }
 
   function live(state) { return activeRun === state && !state.cancelled && !state.failed; }
-  function confirmModelScope(cells, scope) {
-    if (scope === "selection") return true;
-    if (typeof root.confirm !== "function") {
-      status("当前环境无法确认范围授权，未发送表格文本", "error");
-      return false;
-    }
+  function scopeConfirmationDetails(cells, scope) {
     var sheets = Object.create(null), characters = cells.reduce(function (total, cell) { return total + cell.value.length; }, 0);
     cells.forEach(function (cell) { sheets[cell.sheetName] = true; });
     var sheetCount = Object.keys(sheets).length;
@@ -110,9 +105,25 @@
         if (Number.isInteger(workbookSheetCount) && workbookSheetCount > 0) sheetCount = workbookSheetCount;
       } catch (error) { /* the captured text-scope count remains a safe fallback */ }
     }
+    return { scope: scope, sheetCount: sheetCount, cellCount: cells.length, characterCount: characters };
+  }
+  async function confirmModelScope(cells, scope) {
+    if (scope === "selection") return true;
+    if (typeof scopeConfirmationHandler === "function") {
+      try {
+        if (await scopeConfirmationHandler(scopeConfirmationDetails(cells, scope)) === true) return true;
+      } catch (error) { /* a failed UI confirmation must not authorize sending */ }
+      status("已取消校对，未发送表格文本", "idle");
+      return false;
+    }
+    if (typeof root.confirm !== "function") {
+      status("当前环境无法确认范围授权，未发送表格文本", "error");
+      return false;
+    }
+    var details = scopeConfirmationDetails(cells, scope);
     var message = scope === "workbook" ?
-      "将把当前工作簿中 " + sheetCount + " 个工作表的可校对文本（" + cells.length + " 个单元格，共 " + characters + " 个字符）发送给所选模型。\n请确认工作簿中没有不希望发送给模型的敏感内容。\n公式、数字和空单元格会自动跳过。\n是否继续？" :
-      "将把当前工作表中的可校对文本（" + cells.length + " 个单元格，共 " + characters + " 个字符）发送给所选模型进行校对。\n公式、数字和空单元格会自动跳过。\n是否继续？";
+      "将把当前工作簿中 " + details.sheetCount + " 个工作表的可校对文本（" + details.cellCount + " 个单元格，共 " + details.characterCount + " 个字符）发送给所选模型。\n请确认工作簿中没有不希望发送给模型的敏感内容。\n公式、数字和空单元格会自动跳过。\n是否继续？" :
+      "将把当前工作表中的可校对文本（" + details.cellCount + " 个单元格，共 " + details.characterCount + " 个字符）发送给所选模型进行校对。\n公式、数字和空单元格会自动跳过。\n是否继续？";
     try {
       if (root.confirm(message) === true) return true;
     } catch (error) { /* a missing or failed native prompt must not authorize sending */ }
@@ -207,7 +218,8 @@
       if (root.WpsRulesReady) await root.WpsRulesReady;
       if (!live(state)) throw new Error("校对已取消");
       var cells = readScope(state.options.scope);
-      if (!state.options.rulesOnly && !confirmModelScope(cells, state.options.scope)) return;
+      if (!state.options.rulesOnly && !await confirmModelScope(cells, state.options.scope)) return;
+      if (!live(state)) throw new Error("校对已取消");
       var locals = localIssues(cells, state);
       issues = locals; refresh();
       if (!state.options.rulesOnly) {
@@ -397,6 +409,7 @@
     run: run, cancel: cancel, locate: locate, apply: apply, ignore: ignore, applyAll: applyAll, undo: undo,
     runRewrite: runRewrite, applyRewrite: applyRewrite, undoRewrite: undoRewrite, discardRewrite: discardRewrite, cancelRewrite: cancel,
     testConnection: testConnection, readScope: readScope, isBusy: isBusy,
+    setScopeConfirmationHandler: function (handler) { scopeConfirmationHandler = typeof handler === "function" ? handler : null; },
     getIssues: function () { return issues.slice(); }, getHistory: function () { return history.slice(); },
     getTimingRecords: function () { return timing.slice(); }, clearTimingRecords: function () { timing = []; }
   };

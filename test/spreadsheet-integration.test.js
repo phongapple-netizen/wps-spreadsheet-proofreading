@@ -267,6 +267,35 @@ test('asks before sending sheet or workbook text and does not ask for local-only
   assert.equal(confirmations,4);
 });
 
+test('uses the taskpane scope confirmation as a strict one-time send gate', async () => {
+  let calls=0, requests=0, confirmations=0, detail;
+  const h=harness(['范围内文本'],async ()=>{requests++;return JSON.stringify({issues:[]});});
+  h.sheet.UsedRange=h.context.Application.Selection;
+  h.context.confirm=()=>{confirmations++;return true;};
+  h.api.setScopeConfirmationHandler(async summary=>{calls++;detail=summary;return true;});
+  await h.api.run({scope:'sheet'});
+  assert.equal(calls,1);
+  assert.equal(requests,1);
+  assert.equal(confirmations,0);
+  assert.equal(detail.scope,'sheet');
+  assert.equal(detail.sheetCount,1);
+  assert.equal(detail.cellCount,1);
+  assert.equal(detail.characterCount,'范围内文本'.length);
+  assert.deepEqual(Object.keys(detail).sort(),['cellCount','characterCount','scope','sheetCount']);
+
+  h.api.setScopeConfirmationHandler(async()=>false);
+  await h.api.run({scope:'sheet'});
+  assert.match(h.statuses.at(-1).text,/未发送表格文本/);
+  assert.equal(requests,1);
+  assert.equal(confirmations,0);
+
+  h.api.setScopeConfirmationHandler(async()=>1);
+  await h.api.run({scope:'sheet'});
+  assert.match(h.statuses.at(-1).text,/未发送表格文本/);
+  assert.equal(requests,1);
+  assert.equal(confirmations,0);
+});
+
 test('blocks every formula-shaped replacement prefix at the host write boundary', () => {
   const h=harness(['原文'],async ()=>'{"issues":[]}');
   const context=h.context.WpsSpreadsheet.captureContext();

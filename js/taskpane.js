@@ -7,7 +7,7 @@
   var activeMenuId = "";
   var issueCardCache = Object.create(null);
   var expandedAnalysisIds = new Set();
-  var pendingRunOptions = null;
+  var pendingScopeConfirmation = null;
   var labels = { typo: "错别字", punctuation: "标点", grammar: "语法", redundancy: "重复冗余", wording: "用词", consistency: "前后统一", rule: "规则核对" };
   function text(id, value) { var node = $(id); if (node) node.textContent = value == null ? "" : String(value); }
   function safe(value) { return root.WpsSpreadsheetUtil ? root.WpsSpreadsheetUtil.escapeHtml(value) : String(value == null ? "" : value).replace(/[&<>"']/g, function (c) { return ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" })[c]; }); }
@@ -58,42 +58,44 @@
     $("scope-" + value).focus();
     return true;
   }
-  function showScopeConfirmation(options) {
-    pendingRunOptions = Object.assign({}, options);
-    var workbook = options.scope === "workbook";
-    text("scope-confirmation-title", workbook ? "确认校对整个工作簿" : "确认校对当前工作表");
-    text("scope-confirmation-message", workbook
-      ? "将把整个工作簿中各工作表的可校对文本发送给所选模型。请确认工作簿中没有不希望发送给模型的敏感内容。公式、数字和空单元格会自动跳过。"
-      : "将把当前工作表中的可校对文本发送给所选模型。公式、数字和空单元格会自动跳过。");
-    $("scope-confirmation").hidden = false;
+  function resolveScopeConfirmation(accepted) {
+    var pending = pendingScopeConfirmation;
+    if (!pending) return false;
+    pendingScopeConfirmation = null;
+    $("scope-confirmation").hidden = true;
+    if (accepted === true && root.getSpreadsheetRunOptions().scope !== pending.scope) {
+      root.setSpreadsheetStatus({ text: "校对范围已变化，请重新发起校对。", tone: "warning" });
+      pending.resolve(false);
+      return false;
+    }
+    pending.resolve(accepted === true);
+    return true;
+  }
+  function showScopeConfirmation(details) {
+    if (!details || (details.scope !== "sheet" && details.scope !== "workbook")) return Promise.resolve(false);
+    if (pendingScopeConfirmation) resolveScopeConfirmation(false);
+    return new Promise(function (resolve) {
+      pendingScopeConfirmation = { scope: details.scope, resolve: resolve };
+      var workbook = details.scope === "workbook", cellCount = Number(details.cellCount) || 0, characterCount = Number(details.characterCount) || 0;
+      var counts = "（" + cellCount + " 个单元格，共 " + characterCount + " 个字符）";
+      text("scope-confirmation-title", workbook ? "确认校对整个工作簿" : "确认校对当前工作表");
+      text("scope-confirmation-message", workbook
+        ? "将把整个工作簿中 " + (Number(details.sheetCount) || 0) + " 个工作表的可校对文本 " + counts + " 发送给所选模型。请确认工作簿中没有不希望发送给模型的敏感内容。公式、数字和空单元格会自动跳过。"
+        : "将把当前工作表中的可校对文本 " + counts + " 发送给所选模型。公式、数字和空单元格会自动跳过。");
+      $("scope-confirmation").hidden = false;
+    });
   }
   function requestProofreading() {
-    var options = root.getSpreadsheetRunOptions();
-    if (!options.rulesOnly && options.scope !== "selection") {
-      showScopeConfirmation(options);
-      return;
-    }
-    pendingRunOptions = null;
-    $("scope-confirmation").hidden = true;
-    integration().run(options);
+    if (pendingScopeConfirmation) return;
+    integration().run(root.getSpreadsheetRunOptions());
   }
-  function continueScopeRun() {
-    if (!pendingRunOptions) return;
-    var current = root.getSpreadsheetRunOptions();
-    if (current.scope !== pendingRunOptions.scope || current.rulesOnly !== pendingRunOptions.rulesOnly) {
-      pendingRunOptions = null;
-      $("scope-confirmation").hidden = true;
-      root.setSpreadsheetStatus({ text: "校对范围已变化，请重新发起校对。", tone: "warning" });
-      return;
-    }
-    pendingRunOptions = null;
-    $("scope-confirmation").hidden = true;
-    integration().run(current);
-  }
+  function continueScopeRun() { resolveScopeConfirmation(true); }
   function cancelScopeRun() {
-    pendingRunOptions = null;
-    $("scope-confirmation").hidden = true;
-    root.setSpreadsheetStatus({ text: "已取消校对", tone: "idle" });
+    if (resolveScopeConfirmation(false)) root.setSpreadsheetStatus({ text: "已取消校对", tone: "idle" });
+  }
+  function cancelProofreading() {
+    resolveScopeConfirmation(false);
+    integration().cancel();
   }
   function updateSummary() {
     var pending = issues.filter(function (x) { return x.status === "pending"; }), done = issues.filter(function (x) { return ["applied", "ignored", "reverted"].indexOf(x.status) >= 0; }).length;
@@ -153,6 +155,19 @@
       if (current !== node) parent.insertBefore(node, current);
     }
   }
+  function signatureField(value) {
+    if (value == null) return "";
+    var type = typeof value;
+    return type === "string" || type === "number" || type === "boolean" ? value : "[non-scalar]";
+  }
+  function issueRenderSignature(item, showSheet, key) {
+    return JSON.stringify([
+      signatureField(item.id), signatureField(item.status || "pending"), signatureField(item.category), signatureField(item.type),
+      signatureField(item.sheetName), signatureField(item.address), signatureField(item.original), signatureField(item.suggestion),
+      signatureField(item.reason), signatureField(item.origin), !!item.needsReview, signatureField(item.actionable),
+      signatureField(item.action), !!showSheet, !!busy, activeMenuId === item.id, expandedAnalysisIds.has(key)
+    ]);
+  }
   function getIssueCard(item, showSheet) {
     var key = String(item.id == null ? "" : item.id), cached = issueCardCache[key];
     if (!cached) {
@@ -160,7 +175,7 @@
       issueCardCache[key] = cached;
     }
     var state = item.status || "pending";
-    var signature = JSON.stringify([item, showSheet, busy, activeMenuId === item.id, expandedAnalysisIds.has(key)]);
+    var signature = issueRenderSignature(item, showSheet, key);
     if (cached.signature !== signature) {
       cached.node.innerHTML = renderIssue(item, showSheet);
       cached.signature = signature;
@@ -319,6 +334,8 @@
     if (!previous && root.WpsSpreadsheetSettings && root.WpsSpreadsheetSettings.update) settings = Object.assign({}, settings, root.WpsSpreadsheetSettings.update({ provider: p }));
   }
   function wire() {
+    var service = integration();
+    if (service && typeof service.setScopeConfirmationHandler === "function") service.setScopeConfirmationHandler(showScopeConfirmation);
     $("run-proofreading").addEventListener("click", requestProofreading);
     $("rerun-proofreading").addEventListener("click", requestProofreading);
     scopeValues.forEach(function (scope) {
@@ -331,7 +348,7 @@
     $("proofreading-scope").addEventListener("change", function () { setProofreadingScope($("proofreading-scope").value); });
     $("confirm-scope-run").addEventListener("click", continueScopeRun);
     $("cancel-scope-run").addEventListener("click", cancelScopeRun);
-    $("cancel-proofreading").addEventListener("click", function () { integration().cancel(); });
+    $("cancel-proofreading").addEventListener("click", cancelProofreading);
     $("apply-all").addEventListener("click", function () { integration().applyAll(); });
     $("export-results").addEventListener("click", exportResults);
     $("proofreading-issues").addEventListener("click", function (e) {
