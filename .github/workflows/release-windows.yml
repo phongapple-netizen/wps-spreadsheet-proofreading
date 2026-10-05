@@ -59,8 +59,21 @@ jobs:
           Remove-ItemProperty -Path $runPath -Name WPSSpreadsheetProofreading -ErrorAction SilentlyContinue
 
           $installer = (Resolve-Path "dist/windows/WPS-Spreadsheet-Proofreading-$version-Windows-x64-Setup.exe").Path
-          $install = Start-Process -FilePath $installer -ArgumentList '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART' -Wait -PassThru
-          if ($install.ExitCode -ne 0) { throw "Installer failed: $($install.ExitCode)" }
+          Write-Host "Starting installer: $installer"
+          $install = [System.Diagnostics.Process]::Start($installer, '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART')
+          if (-not $install.WaitForExit(120000)) {
+            $install.Kill()
+            $log = Join-Path $env:LOCALAPPDATA 'WPSSpreadsheetProofreading\service-error.log'
+            if (Test-Path $log) { Write-Host "service-error.log:"; Get-Content $log }
+            Get-Process | Where-Object { $_.ProcessName -match 'WPS|Spreadsheet|unins' } | Format-Table -AutoSize
+            throw 'Installer timed out.'
+          }
+          Write-Host "Installer exit code: $($install.ExitCode)"
+          if ($install.ExitCode -ne 0) {
+            $log = Join-Path $env:LOCALAPPDATA 'WPSSpreadsheetProofreading\service-error.log'
+            if (Test-Path $log) { Write-Host "service-error.log:"; Get-Content $log }
+            throw "Installer failed: $($install.ExitCode)"
+          }
 
           $registered = Get-Content $publish -Raw
           if ($registered -notmatch 'wps-spreadsheet-proofreading' -or $registered -notmatch 'wps-text-proofreading' -or $registered -notmatch 'other-addon') { throw 'WPS coexistence registration failed.' }
@@ -79,7 +92,14 @@ jobs:
           if(-not $ready){throw 'Installed Spreadsheet service did not start.'}
 
           $uninstaller = Join-Path $env:LOCALAPPDATA 'Programs\WPSSpreadsheetProofreading\unins000.exe'
-          $uninstall = Start-Process -FilePath $uninstaller -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait -PassThru
+          Write-Host "Starting uninstaller: $uninstaller"
+          $uninstall = [System.Diagnostics.Process]::Start($uninstaller, '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART')
+          if (-not $uninstall.WaitForExit(120000)) {
+            $uninstall.Kill()
+            Get-Process | Where-Object { $_.ProcessName -match 'WPS|Spreadsheet|unins' } | Format-Table -AutoSize
+            throw 'Uninstaller timed out.'
+          }
+          Write-Host "Uninstaller exit code: $($uninstall.ExitCode)"
           if ($uninstall.ExitCode -ne 0) { throw "Uninstaller failed: $($uninstall.ExitCode)" }
           $remaining=Get-Content $publish -Raw
           if($remaining -match 'wps-spreadsheet-proofreading' -or $remaining -notmatch 'wps-text-proofreading' -or $remaining -notmatch 'other-addon'){throw 'Spreadsheet uninstall damaged other add-ins.'}
