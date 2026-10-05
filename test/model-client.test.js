@@ -73,6 +73,7 @@ test('model discovery supports OpenAI and OpenCode provider endpoints', async t 
   assert.equal(url,'https://api.example/v1/models');
   assert.deepEqual(openai.models,['m1','m2']);
   const oc=await client.fetchModels({provider:'opencode',endpoint:'http://127.0.0.1:4097'});
+  assert.equal(url,'http://127.0.0.1:4097/config/providers');
   assert.deepEqual(oc.models,['opencode/mimo-free','opencode/other']);
   assert.equal(oc.defaultModel,'opencode/mimo-free');
 });

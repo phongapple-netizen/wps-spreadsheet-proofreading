@@ -10,6 +10,8 @@ const source = fs.readFileSync(path.join(__dirname, "../js/taskpane.js"), "utf8"
 const ids = Array.from(html.matchAll(/\bid="([^"]+)"/g), match => match[1]);
 
 class Element {
+  get innerHTML() { return this.html || ""; }
+  set innerHTML(value) { this.html = value; this.children = []; this.options = this.children; }
   constructor(id) {
     this.id = id; this.value = ""; this.textContent = ""; this.innerHTML = ""; this.hidden = false;
     this.disabled = false; this.checked = false; this.dataset = {}; this.style = {}; this.attributes = {};
@@ -61,6 +63,8 @@ function makeRuntime(options = {}) {
   const settings = {
     KEY: "test-settings",
     get: currentSettings,
+    loadCatalog(provider, endpoint) { const catalog = (profileStore.catalogs || {})[provider]; return catalog && catalog.endpoint === endpoint ? catalog.models : []; },
+    saveCatalog(provider, endpoint, models) { profileStore.catalogs ||= {}; profileStore.catalogs[provider] = { endpoint, models }; },
     update(patch = {}) {
       const provider = patch.provider || profileStore.provider;
       profileStore.provider = provider;
@@ -104,6 +108,16 @@ function makeRuntime(options = {}) {
 
 function click(el) { el.dispatch("click"); }
 
+test("proofreading errors and stale-cell warnings remain visible", () => {
+  const { root, elements } = makeRuntime();
+  for (const message of ["模型调用失败", "单元格内容已变化，请重新校对。"]) {
+    root.setSpreadsheetStatus({ text: message, tone: "error" });
+    assert.equal(elements["proofreading-status"].hidden, false);
+    assert.equal(elements["proofreading-status"].textContent, message);
+    assert.equal(elements["proofreading-status"].className, "status status-error");
+  }
+});
+
 test("history tab remains selected while issue and history callbacks refresh", () => {
   const { root, elements } = makeRuntime();
   assert.equal(elements["history-empty"].hidden, true);
@@ -127,6 +141,41 @@ test("settings opens as a page and back restores the main view", () => {
   assert.equal(elements["main-view"].hidden, false);
   assert.equal(elements["settings-popover"].hidden, true);
   assert.equal(elements["settings-toggle"].attributes["aria-expanded"], "false");
+});
+
+test("opening settings reads models without starting OpenCode and keeps all choices after provider switches", async () => {
+  let health = 0, starts = 0;
+  const { elements, root } = makeRuntime({ client: {
+    async testConnection() { health++; },
+    async ensureService() { starts++; },
+    async fetchModels() { return { models: ['opencode/test', 'p/second', 'p/third'], defaultModel: 'p/second' }; }
+  } });
+  click(elements['settings-toggle']);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(health, 1); assert.equal(starts, 0);
+  assert.equal(elements['model-suggestions'].children.length, 4);
+  elements['model-suggestions'].value = 'p/second';
+  elements['model-suggestions'].dispatch('change');
+  assert.equal(root.getSpreadsheetModelOptions().model, 'p/second');
+  elements['model-provider'].value = 'ollama'; elements['model-provider'].dispatch('change');
+  elements['model-provider'].value = 'opencode'; elements['model-provider'].dispatch('change');
+  assert.equal(elements['model-suggestions'].value, 'p/second');
+  assert.match(elements['model-detection-result'].textContent, /缓存 3 个模型/);
+});
+
+test("Word-style cards expand and locate while actions keep their own targets", () => {
+  const { root, elements, calls } = makeRuntime();
+  root.setSpreadsheetIssues([{ id: 'i1', address: 'B3', sheetName: 'Data', original: '<通到>', suggestion: '通道', reason: '错别字', status: 'pending', actionable: true }]);
+  assert.match(elements['proofreading-issues'].innerHTML, /issue-card-header/);
+  assert.match(elements['proofreading-issues'].innerHTML, /preview-old/);
+  assert.match(elements['proofreading-issues'].innerHTML, /&lt;通到&gt;/);
+  assert.match(elements['proofreading-issues'].innerHTML, /aria-expanded="false"/);
+  const target = { closest(selector) { return selector === '.issue-analysis' ? null : { dataset: { action: 'locate', id: 'i1' } }; } };
+  elements['proofreading-issues'].dispatch('click', { target });
+  assert.match(elements['proofreading-issues'].innerHTML, /aria-expanded="true"/);
+  assert.deepEqual(calls.at(-1), ['locate', 'i1']);
+  elements['proofreading-issues'].dispatch('click', { target: { closest(selector) { return selector === '.issue-analysis' ? null : { dataset: { action: 'apply', id: 'i1' } }; } } });
+  assert.deepEqual(calls.at(-1), ['apply', 'i1']);
 });
 
 test("soft rewrite risk requires confirmation while blocked risk stays disabled", () => {
@@ -159,10 +208,10 @@ test("model refresh checks the OpenCode service before reading models", async ()
   click(elements["refresh-models"]);
   await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(calls.slice(0, 2).map(call => call[0]), ["ensureService", "fetchModels"]);
-  assert.equal(elements["model-suggestions"].value, "opencode/new");
-  assert.equal(elements["connection-status"].textContent, "读取成功");
+  assert.equal(elements["model-suggestions"].value, "opencode/test");
+  assert.equal(elements["connection-status"].textContent, "已读取 1 个模型 · 读取成功");
   assert.equal(elements["refresh-models"].disabled, false);
-  assert.equal(root.getSpreadsheetModelOptions().model, "opencode/new");
+  assert.equal(root.getSpreadsheetModelOptions().model, "opencode/test");
 });
 
 test("review-only issues are labeled and stale items stay outside processed totals", () => {

@@ -293,7 +293,8 @@
       return { models: compatibleModels, defaultModel: compatibleModels[0] || "", detail: "OpenAI 兼容接口" };
     }
     var opencodeHeaders = Object.assign({ "Content-Type": "application/json" }, authHeaders(options.password));
-    data = await jsonFetch(endpoint + "/provider", { method: "GET", headers: opencodeHeaders }, {
+    // Match the Word client: configured providers, rather than the full public catalog.
+    data = await jsonFetch(endpoint + "/config/providers", { method: "GET", headers: opencodeHeaders }, {
       timeoutMs: options.timeoutMs || HEALTH_TIMEOUT_MS, signal: options.signal, operation: "读取 OpenCode 模型列表"
     });
     var all = data && (data.all || data.providers) || [];
