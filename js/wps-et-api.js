@@ -31,17 +31,42 @@
     catch (error) { return null; }
   }
 
-  function workbookKey(workbook) {
-    if (!workbook) return "";
+  function identityFailure(field, required) {
+    if (required) throw new Error("无法确认原工作簿或工作表：WPS 未返回有效的 " + field + "，未发送表格文本。");
+    return "";
+  }
+  function sheetIdentityProperty(sheet, field) {
+    try { return sheet[field]; }
+    catch (error) { return identityFailure("Worksheet." + field, true); }
+  }
+  function sheetCodeName(sheet) {
+    try { return String(sheet.CodeName || ""); }
+    catch (error) { return ""; }
+  }
+  function sameNativeSheet(anchor, sheet) {
+    var app = getApplication();
+    if (!anchor || !sheet || !app || typeof app.Intersect !== "function") return false;
     try {
-      var name = String(workbook.FullName || "");
-      var handle = Number(workbook.Windows.Item(1).Hwnd);
-      return name && Number.isFinite(handle) && handle > 0 ? name + "|" + handle : "";
-    } catch (error) { return ""; }
+      // ET compares the native Range owners, including when JS wrappers differ.
+      // Intersect fails for different worksheets; no cell values are read or written.
+      var overlap = app.Intersect(anchor, sheet.Range("A1"));
+      return !!overlap && normalizeAddress(overlap.Address(false, false)) === "A1";
+    } catch (error) { return false; }
+  }
+  function workbookKey(workbook, required) {
+    if (!workbook) return identityFailure("ActiveWorkbook", required);
+    var name, handle;
+    try { name = String(workbook.FullName || ""); }
+    catch (error) { return identityFailure("Workbook.FullName", required); }
+    if (!name) return identityFailure("Workbook.FullName", required);
+    try { handle = Number(workbook.Windows.Item(1).Hwnd); }
+    catch (error) { return identityFailure("Workbook.Windows.Item(1).Hwnd", required); }
+    if (!Number.isFinite(handle) || handle <= 0) return identityFailure("Workbook.Windows.Item(1).Hwnd", required);
+    return name + "|" + handle;
   }
 
-  function getWorkbookKey(workbook) {
-    return workbookKey(workbook || getActiveWorkbook());
+  function getWorkbookKey(workbook, required) {
+    return workbookKey(workbook || getActiveWorkbook(), required);
   }
 
   function normalizeAddress(address) {
@@ -56,25 +81,37 @@
   function captureContext(workbook, sheet) {
     workbook = workbook || getActiveWorkbook();
     sheet = sheet || (workbook === getActiveWorkbook() ? getActiveSheet() : workbook && workbook.ActiveSheet);
-    var key = workbookKey(workbook);
-    if (!workbook || !sheet || !key) throw new Error("无法确认工作簿和工作表，请重新选择单元格");
+    var key = workbookKey(workbook, true);
+    if (!sheet) return identityFailure("ActiveSheet", true);
     try {
-      var sheetName = String(sheet.Name || "");
-      var sheetCodeName = String(sheet.CodeName || "");
-      var sheetIndex = Number(sheet.Index);
-      var parentKey = workbookKey(sheet.Parent);
-      if (!sheetName || !sheetCodeName || !Number.isInteger(sheetIndex) || sheetIndex < 1 || parentKey !== key) {
-        throw new Error("无法确认工作簿和工作表，请重新选择单元格");
+      var sheetName = String(sheetIdentityProperty(sheet, "Name") || "");
+      var codeName = sheetCodeName(sheet);
+      var sheetIndex = Number(sheetIdentityProperty(sheet, "Index"));
+      var parentKey = workbookKey(sheetIdentityProperty(sheet, "Parent"));
+      if (!sheetName) return identityFailure("Worksheet.Name", true);
+      if (!Number.isInteger(sheetIndex) || sheetIndex < 1) return identityFailure("Worksheet.Index", true);
+      if (parentKey !== key) return identityFailure("Worksheet.Parent 工作簿身份", true);
+      // Some ET files have no CodeName and wrap the same sheet in different JS
+      // objects. Preserve a native anchor instead of trusting tab names or ===.
+      var sheetAnchor = null;
+      if (!codeName) {
+        try { sheetAnchor = sheet.Range("A1"); }
+        catch (error) { return identityFailure("Worksheet.Range(A1)", true); }
+        if (!sameNativeSheet(sheetAnchor, workbook.Worksheets.Item(sheetIndex))) {
+          return identityFailure("Worksheet 原生区域身份（CodeName 不可用，Intersect 核验失败）", true);
+        }
       }
       return {
         workbook: workbook,
         sheet: sheet,
+        sheetAnchor: sheetAnchor,
         workbookKey: key,
         sheetName: sheetName,
-        sheetCodeName: sheetCodeName,
+        sheetCodeName: codeName,
         sheetIndex: sheetIndex
       };
     } catch (error) {
+      if (error && /^无法确认原工作簿或工作表：/.test(error.message)) throw error;
       throw new Error("无法确认工作簿和工作表，请重新选择单元格");
     }
   }
@@ -84,13 +121,14 @@
         workbookKey(getActiveWorkbook()) !== context.workbookKey || workbookKey(context.workbook) !== context.workbookKey) return null;
     try {
       var sheet = context.sheet;
-      if (String(sheet.Name) !== context.sheetName || String(sheet.CodeName || "") !== context.sheetCodeName ||
+      if (String(sheet.Name) !== context.sheetName || (context.sheetCodeName && sheetCodeName(sheet) !== context.sheetCodeName) ||
           workbookKey(sheet.Parent) !== context.workbookKey) return null;
       var index = Number(sheet.Index);
       if (!Number.isInteger(index) || index < 1) return null;
       var member = context.workbook.Worksheets.Item(index);
       if (!member || String(member.Name || "") !== context.sheetName ||
-          String(member.CodeName || "") !== context.sheetCodeName || workbookKey(member.Parent) !== context.workbookKey) return null;
+          (context.sheetCodeName ? sheetCodeName(member) !== context.sheetCodeName : !sameNativeSheet(context.sheetAnchor, member)) ||
+          workbookKey(member.Parent) !== context.workbookKey) return null;
       return sheet; // Keep the original native worksheet reference; never retarget by its tab name.
     } catch (error) { return null; }
   }

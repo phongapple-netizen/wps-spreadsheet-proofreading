@@ -18,6 +18,7 @@ function harness(values, request) {
     Application:{
       ActiveWorkbook:workbook,
       ActiveSheet:sheet,
+      Intersect:(left,right)=>left === right ? left : null,
       Selection:{Rows:{Count:values.length},Columns:{Count:1},Item:r=>ranges[r-1]}
     },
     WpsSpreadsheetProofreadingCore:core,
@@ -111,6 +112,86 @@ test('never sends oversized cells or cells without workbook identity', async () 
   await h.api.run();
   assert.equal(calls,0);
   assert.match(h.statuses.at(-1).text,/无法确认/);
+});
+
+test('identity failures identify the missing host field and never send text', async () => {
+  const cases = [
+    ['Workbook.FullName', h => { h.workbook.FullName = ''; }],
+    ['Workbook.Windows.Item(1).Hwnd', h => { h.workbook.Windows = undefined; }],
+    ['Workbook.Windows.Item(1).Hwnd', h => { h.workbook.Windows.Item = () => ({Hwnd:0}); }],
+    ['Worksheet 原生区域身份', h => { h.sheet.CodeName = ''; h.context.Application.Intersect = undefined; }],
+    ['Worksheet 原生区域身份', h => { h.sheet.CodeName = ''; h.context.Application.Intersect = () => null; }],
+    ['Worksheet 原生区域身份', h => { h.sheet.CodeName = ''; h.context.Application.Intersect = () => {throw new Error('native failure');}; }],
+    ['Worksheet 原生区域身份', h => { h.sheet.CodeName = ''; h.context.Application.Intersect = () => ({Address:()=>'A2'}); }],
+    ['Worksheet.Index', h => { h.sheet.Index = undefined; }],
+    ['Worksheet.Parent', h => { h.sheet.Parent = {FullName:'other.xlsx',Windows:{Item:()=>({Hwnd:202})}}; }]
+  ];
+  for (const [field, mutate] of cases) {
+    let requests = 0;
+    const h = harness(['原文'], async () => { requests++; return '{"issues":[]}'; });
+    mutate(h);
+    await h.api.run();
+    assert.equal(requests, 0, field);
+    assert.ok(h.statuses.at(-1).text.includes(field), h.statuses.at(-1).text);
+    assert.match(h.statuses.at(-1).text, /未发送表格文本/);
+    assert.equal(h.context.WpsSpreadsheet.writeAddress('A1', '原文', '修改', {}).ok, false);
+    assert.equal(h.ranges[0].Value2, '原文');
+  }
+});
+
+test('sheets without CodeName use native range ownership for read, locate and write', async () => {
+  for (const unavailable of ['', undefined, 'throws']) {
+    const h = harness(['原文'], async (_, prompt) => reply(prompt, () => '修改'));
+    if (unavailable === 'throws') Object.defineProperty(h.sheet, 'CodeName', {get(){throw new Error('unsupported');}});
+    else h.sheet.CodeName = unavailable;
+    await h.api.run();
+    assert.equal(h.issues.length, 1);
+    assert.equal(h.issues[0].context.sheetCodeName, '');
+    h.api.locate(h.issues[0].id);
+    assert.equal(h.context.Application.Selection, h.ranges[0]);
+    h.api.apply(h.issues[0].id);
+    assert.equal(h.ranges[0].Value2, '修改');
+    assert.equal(h.issues[0].status, 'applied');
+  }
+});
+
+test('native Intersect verifies worksheet membership across distinct JS host wrappers', async () => {
+  const h = harness(['原文'], async (_, prompt) => reply(prompt, () => '修改'));
+  h.sheet.CodeName = '';
+  h.workbook.Worksheets.Item = () => Object.assign({}, h.sheet, {Range:()=>Object.assign({}, h.ranges[0])});
+  let checks = 0;
+  h.context.Application.Intersect = (anchor, current) => {
+    assert.equal(anchor, h.ranges[0]);
+    assert.notEqual(anchor, current);
+    checks++;
+    return {Address:()=>'$A$1'};
+  };
+  await h.api.run();
+  assert.equal(h.issues.length, 1);
+  h.api.apply(h.issues[0].id);
+  assert.equal(h.ranges[0].Value2, '修改');
+  assert.ok(checks >= 4);
+});
+
+test('without CodeName a same-name replacement cannot be located, written or undone', async () => {
+  for (const afterApply of [false, true]) {
+    const h = harness(['原文'], async (_, prompt) => reply(prompt, () => '修改'));
+    h.sheet.CodeName = '';
+    await h.api.run();
+    const id = h.issues[0].id;
+    if (afterApply) h.api.apply(id);
+    const replacement = {Value2:afterApply ? '修改' : '原文', Formula:'原文', FormulaR1C1:'原文', Address:()=>'A1'};
+    h.sheets[0] = {Name:'Sheet1',CodeName:'',Index:1,Parent:h.workbook,Range:()=>replacement};
+    if (afterApply) assert.equal(h.api.undo(h.api.getHistory()[0].id), false);
+    else {
+      h.api.locate(id);
+      assert.match(h.statuses.at(-1).text, /无法定位/);
+      h.api.apply(id);
+    }
+    assert.equal(replacement.Value2, afterApply ? '修改' : '原文');
+    assert.equal(h.ranges[0].Value2, afterApply ? '修改' : '原文');
+    assert.match(h.statuses.at(-1).text, /单元格内容已变化/);
+  }
 });
 
 test('refuses writes to formulas, other workbooks, or formula-shaped suggestions', async () => {

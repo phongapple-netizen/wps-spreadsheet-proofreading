@@ -29,7 +29,7 @@
   // Each cell retains its own identity; no text is concatenated across cells.
   function readScope(scope) {
     scope = scope || "selection";
-    var workbookKey = api().getWorkbookKey();
+    var workbookKey = api().getWorkbookKey(null, true);
     if (!workbookKey) throw new Error("无法确认原工作簿或工作表，请重新打开表格后再试");
     var workbook = api().getActiveWorkbook();
     var targets = [], activeSheet = api().getActiveSheet();
@@ -56,7 +56,7 @@
     targets.forEach(function (target) {
       var context;
       try { context = api().captureContext(workbook, target.sheet); }
-      catch (error) { throw new Error("无法确认原工作簿或工作表，请重新打开表格后再试"); }
+      catch (error) { throw new Error(error.message || "无法确认原工作簿或工作表，请重新打开表格后再试"); }
       var sheetName = context.sheetName;
       var range = target.range;
       if (!range) throw new Error("无法读取工作表使用区域，请检查 WPS 表格 API");
