@@ -189,6 +189,47 @@ test('OpenCode cancellation aborts and deletes with fresh signals even when clea
   assert.ok(cleanup.every(x=>x.init.signal!==parent.signal && x.init.signal.aborted));
 });
 
+test('OpenCode preserves standard tool definitions with approval gates and rejects returned tool parts', async t => {
+  const oldFetch = global.fetch;
+  t.after(() => { global.fetch = oldFetch; });
+  const calls = [];
+  global.fetch = async (url, init) => {
+    calls.push({ url, init });
+    if (url.endsWith('/session')) return response(openCodeSession());
+    if (url.endsWith('/message')) {
+      const payload = JSON.parse(init.body);
+      assert.equal(Object.hasOwn(payload, 'tools'), false);
+      assert.equal(payload.agent, 'build');
+      return response({ parts: [{ type: 'text', text: 'done' }, { type: 'tool', tool: 'read' }] });
+    }
+    return response([]);
+  };
+  await assert.rejects(client.request({ endpoint: 'http://opencode', model: 'provider/model' }, 'x'), /尝试调用工具/);
+  const session = calls.find(call => call.url.endsWith('/session') && call.init.method === 'POST');
+  assert.deepEqual(JSON.parse(session.init.body).permission, [{ permission: '*', pattern: '*', action: 'ask' }]);
+  assert.ok(calls.some(call => call.url.endsWith('/abort')));
+  assert.ok(calls.some(call => call.init.method === 'DELETE'));
+});
+
+test('OpenCode uses final text only and reports provider billing and access failures', async t => {
+  const oldFetch = global.fetch;
+  t.after(() => { global.fetch = oldFetch; });
+  let status = 0;
+  global.fetch = async (url) => {
+    if (url.endsWith('/session')) return response(openCodeSession());
+    if (url.endsWith('/message')) return response(status
+      ? { info: { error: { name: 'APIError', data: { statusCode: status } } } }
+      : { parts: [{ type: 'reasoning', text: 'private reasoning' }, { type: 'text', text: '{"issues":[]}' }] });
+    return response([]);
+  };
+  const options = { endpoint: 'http://opencode', model: 'provider/model' };
+  assert.equal(await client.request(options, 'x'), '{"issues":[]}');
+  status = 402;
+  await assert.rejects(client.request(options, 'x'), /余额不足/);
+  status = 403;
+  await assert.rejects(client.request(options, 'x'), /免费模型使用限制/);
+});
+
 test('OpenCode cleanup hanging does not block a returned result', async t => {
   const oldFetch = global.fetch;
   t.after(() => { global.fetch = oldFetch; });
