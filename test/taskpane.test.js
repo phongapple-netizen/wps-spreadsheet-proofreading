@@ -126,6 +126,27 @@ function makeRuntime(options = {}) {
 }
 
 function click(el) { el.dispatch("click"); }
+
+test('workbook changes dismiss pending authorization and identify the current file', async () => {
+  const {root,elements,scopeConfirmationRequests}=makeRuntime({scope:'sheet'});
+  click(elements['run-proofreading']);
+  assert.equal(elements['scope-confirmation'].hidden,false);
+  root.setSpreadsheetWorkbook({key:'other',name:'另一份.xlsx'});
+  assert.equal(await scopeConfirmationRequests[0],false);
+  assert.equal(elements['scope-confirmation'].hidden,true);
+  assert.equal(elements['current-workbook'].textContent,'当前文件：另一份.xlsx');
+  assert.equal(elements['processed-issues'].open,false);
+});
+
+test('bulk correction explains eligibility when custom or AI suggestions are excluded', () => {
+  const {root,elements}=makeRuntime();
+  root.setSpreadsheetIssues([{id:'custom',origin:'rule',status:'pending',needsReview:true,autoFixable:false,original:'原文',suggestion:'修改'}]);
+  assert.equal(elements['apply-all'].disabled,true);
+  assert.match(elements['apply-all-hint'].textContent,/自定义规则和 AI 建议需逐条确认/);
+  assert.match(html, /id="rule-auto-fix"[^>]*disabled/);
+  assert.match(html, /id="apply-all-hint" class="field-note"/);
+  assert.match(html, /id="current-workbook" class="field-note"/);
+});
 function actionTarget(action, id) {
   return { closest(selector) {
     if (selector === ".issue-analysis summary" || selector === ".issue-analysis") return null;

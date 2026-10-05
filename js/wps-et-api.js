@@ -150,6 +150,41 @@
     try { return app.CreateTaskPane(url) || null; } catch (error) { return null; }
   }
 
+  var undoTransaction = null;
+  function beginNativeUndo(context) {
+    try {
+      var workbook = context ? context.workbook : getActiveWorkbook();
+      var key = workbookKey(workbook);
+      if (!key || workbookKey(getActiveWorkbook()) !== key) return null;
+      if (undoTransaction) {
+        if (undoTransaction.key !== key) return null;
+        undoTransaction.depth++;
+        return undoTransaction;
+      }
+      var tools = getApplication().DebugTools;
+      if (!tools || typeof tools.UndoTransBegin !== "function" || typeof tools.UndoTransEnd !== "function") return null;
+      tools.UndoTransBegin(workbook);
+      undoTransaction = { tools: tools, workbook: workbook, key: key, depth: 1 };
+      return undoTransaction;
+    } catch (error) { return null; }
+  }
+  function endNativeUndo(transaction) {
+    if (!transaction || transaction !== undoTransaction) return false;
+    if (--transaction.depth > 0) return true;
+    undoTransaction = null;
+    try { transaction.tools.UndoTransEnd(transaction.workbook, false, "表格校改"); return true; }
+    catch (error) { return false; }
+  }
+  function onWorkbookActivation(callback) {
+    var app = getApplication(), events;
+    try { events = app && app.ApiEvent || root.wps && root.wps.ApiEvent; }
+    catch (error) { return; }
+    if (!events || typeof events.AddApiEventListener !== "function") return;
+    ["WorkbookActivate", "WindowActivate"].forEach(function (name) {
+      try { events.AddApiEventListener(name, callback); } catch (error) { /* timer fallback */ }
+    });
+  }
+
   function readCell(cell) {
     if (!cell) return null;
     var value = null, formula, formulaR1C1, rawHasFormula;
@@ -216,14 +251,16 @@
       if (info.hasFormula) return { ok: false, reason: "公式单元格禁止写入" };
       var currentValue = info.value == null && expected === "" ? "" : info.value;
       if (info.address !== address || typeof currentValue !== "string" || currentValue !== expected || !contextSheet(context)) return changed;
-      range.Value2 = replacement;
+      var transaction = beginNativeUndo(context), nativeUndo = false;
+      try { range.Value2 = replacement; }
+      finally { nativeUndo = endNativeUndo(transaction); }
       var written = readCell(range);
       var writtenValue = written && written.value == null && replacement === "" ? "" : written && written.value;
       if (!contextSheet(context) || !written || written.address !== address || written.hasFormula ||
           !written.formulaKnown || writtenValue !== replacement) {
         return { ok: false, reason: "写回后内容与建议不一致，请检查单元格并重新校对" };
       }
-      return { ok: true };
+      return { ok: true, nativeUndo: nativeUndo };
     } catch (error) {
       return { ok: false, reason: "写入失败：" + (error && error.message ? error.message : String(error)) };
     }
@@ -240,6 +277,9 @@
     getPluginStorage: getPluginStorage,
     getTaskPane: getTaskPane,
     createTaskPane: createTaskPane,
+    beginNativeUndo: beginNativeUndo,
+    endNativeUndo: endNativeUndo,
+    onWorkbookActivation: onWorkbookActivation,
     readCell: readCell,
     readAddress: readAddress,
     selectAddress: selectAddress,

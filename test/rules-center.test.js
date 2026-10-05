@@ -28,6 +28,13 @@ test('uses spreadsheet-specific storage and only exact built-in autofix signatur
   assert.equal(rules.isSafeAutoFix(forged), false);
 });
 
+test('a custom replacement requesting bulk application remains a manual review suggestion', () => {
+  const custom=rules.createRule({name:'通道错字',type:'replace',pattern:'通到',replacement:'通道',autoFix:true,enabled:true});
+  rules.saveRule(custom);
+  const issue=rules.evaluate('疏散通到堆放杂物。',0).find(x=>x.ruleId===custom.id);
+  assert.ok(issue); assert.equal(issue.needsReview,true); assert.equal(issue.autoFixable,false);
+});
+
 test('summarizes each selected cell independently and preserves cell identity', () => {
   global.WpsSpreadsheetIntegration = {
     isBusy: () => false,

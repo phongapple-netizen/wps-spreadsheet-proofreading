@@ -7,6 +7,7 @@ const core = require('../js/proofreading-core.js');
 
 function harness(values, request) {
   const statuses = [], busy = [];
+  const storage = new Map(), undoRegistrations = [];
   let issues = [];
   const ranges = values.map(value=>({Value2:value,Formula:value,FormulaR1C1:value}));
   const workbook = {FullName:'book.xlsx',CodeName:'Book1',Windows:{Item:()=>({Hwnd:101})}};
@@ -16,6 +17,8 @@ function harness(values, request) {
   const context = {
     AbortController,
     Application:{
+      PluginStorage:{getItem:key=>storage.get(key)||'',setItem:(key,value)=>storage.set(key,value)},
+      DebugTools:{UndoTransBegin:book=>undoRegistrations.push({type:'begin',book}),UndoTransEnd:(book,cancel,desc)=>undoRegistrations.push({type:'end',book,cancel,desc})},
       ActiveWorkbook:workbook,
       ActiveSheet:sheet,
       Intersect:(left,right)=>left === right ? left : null,
@@ -37,13 +40,130 @@ function harness(values, request) {
   sheet.Activate=()=>{context.Application.ActiveSheet=sheet;};
   ['wps-et-api.js','spreadsheet-integration.js'].forEach(file=>
     vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../js',file),'utf8'),context));
-  return {context,workbook,sheet,sheets,ranges,statuses,busy,get issues(){return issues;},api:context.WpsSpreadsheetIntegration};
+  context.WpsSpreadsheetIntegration.syncWorkbook(); busy.length=0; statuses.length=0;
+  return {context,workbook,sheet,sheets,ranges,statuses,busy,storage,undoRegistrations,get issues(){return issues;},api:context.WpsSpreadsheetIntegration};
 }
 
 function reply(prompt, transform) {
   const cells = JSON.parse(prompt.split('待校对段落：\n\n')[1].split('\n\n表格位置索引')[0]);
   return JSON.stringify({issues:cells.map(cell=>({paragraphIndex:cell.paragraphIndex,category:'typo',original:cell.text,suggestion:transform(cell.text),action:'replace',confidence:0.99,needsReview:false}))});
 }
+
+function activateOtherWorkbook(h) {
+  const original={workbook:h.context.Application.ActiveWorkbook,sheet:h.context.Application.ActiveSheet,selection:h.context.Application.Selection};
+  const workbook={Name:'other.xlsx',FullName:'other.xlsx',Windows:{Item:()=>({Hwnd:202})}};
+  const range={Value2:'另一份，，表格。',Formula:'另一份，，表格。',FormulaR1C1:'另一份，，表格。',Address:()=> 'A1'};
+  const sheet={Name:'Sheet1',CodeName:'OtherSheet',Index:1,Parent:workbook,Range:()=>range};
+  sheet.Activate=()=>{h.context.Application.ActiveSheet=sheet;};
+  range.Select=()=>{h.context.Application.Selection=range;};
+  workbook.Worksheets={Count:1,Item:()=>sheet};
+  Object.assign(h.context.Application,{ActiveWorkbook:workbook,ActiveSheet:sheet,Selection:{Rows:{Count:1},Columns:{Count:1},Item:()=>range}});
+  return {range, restore(){Object.assign(h.context.Application,{ActiveWorkbook:original.workbook,ActiveSheet:original.sheet,Selection:original.selection});}};
+}
+
+test('workbook switching restores separate issues and histories without cross-file writes', async () => {
+  const h=harness(['原文'],async (_,prompt)=>reply(prompt,()=> '修改'));
+  await h.api.run(); const id=h.issues[0].id;
+  h.api.apply(id); const record=h.api.getHistory()[0];
+  const other=activateOtherWorkbook(h);
+  h.api.syncWorkbook();
+  assert.equal(h.issues.length,0); assert.equal(h.api.getHistory().length,0);
+  await h.api.run(); const otherId=h.issues[0].id;
+  h.api.apply(id); assert.equal(other.range.Value2,'另一份，，表格。');
+  other.restore(); h.api.syncWorkbook();
+  assert.equal(h.issues[0].id,id); assert.equal(h.issues[0].status,'applied');
+  assert.equal(h.api.getHistory()[0].id,record.id);
+  h.api.apply(otherId); assert.equal(h.ranges[0].Value2,'修改');
+  assert.equal(h.api.undo(record.id),true); assert.equal(h.ranges[0].Value2,'原文');
+});
+
+test('switching during a request aborts it and late completion cannot overwrite the new workbook', async () => {
+  let release, signal;
+  const h=harness(['原文'],(options,prompt)=>{signal=options.signal;return new Promise(resolve=>{release=()=>resolve(reply(prompt,()=> '旧请求'));});});
+  const oldRun=h.api.run(); while(!release) await Promise.resolve();
+  const other=activateOtherWorkbook(h); h.api.syncWorkbook();
+  assert.equal(signal.aborted,true); assert.equal(h.api.isBusy(),false);
+  h.context.WpsSpreadsheetModelClient.request=async (_,prompt)=>reply(prompt,()=> '新请求');
+  await h.api.run(); const newId=h.issues[0].id;
+  release(); await oldRun;
+  assert.equal(h.issues.length,1); assert.equal(h.issues[0].id,newId);
+  assert.equal(h.issues[0].suggestion,'新请求');
+  other.restore(); h.api.syncWorkbook(); assert.equal(h.issues.length,0);
+});
+
+test('native transactions wrap writes and observed undo updates history without another write', async () => {
+  const h=harness(['原文'],async (_,prompt)=>reply(prompt,()=> '修改'));
+  await h.api.run(); h.api.apply(h.issues[0].id);
+  assert.deepEqual(h.undoRegistrations.map(x=>x.type),['begin','end']);
+  assert.equal(h.undoRegistrations[0].book,h.workbook);
+  assert.equal(h.undoRegistrations[1].cancel,false);
+  assert.equal(h.undoRegistrations[1].desc,'表格校改');
+  h.ranges[0].Value2='用户编辑'; h.api.checkNativeUndo();
+  assert.equal(h.api.getHistory()[0].status,'applied');
+  h.ranges[0].Value2='原文'; h.api.checkNativeUndo();
+  assert.equal(h.api.getHistory()[0].status,'undone');
+  assert.equal(h.issues[0].status,'reverted');
+  assert.equal(h.undoRegistrations.length,2);
+});
+
+test('observing native undo never updates another workbook history or writes its cells', async () => {
+  const h=harness(['原文'],async (_,prompt)=>reply(prompt,()=> '修改'));
+  await h.api.run(); h.api.apply(h.issues[0].id);
+  const other=activateOtherWorkbook(h); h.api.syncWorkbook(); h.api.checkNativeUndo();
+  assert.equal(h.ranges[0].Value2,'修改'); assert.equal(other.range.Value2,'另一份，，表格。');
+  assert.equal(h.api.getHistory().length,0);
+  other.restore(); h.api.syncWorkbook(); assert.equal(h.api.getHistory()[0].status,'applied');
+});
+
+test('switching while authorization is pending prevents sending and preserves the new pane status', async () => {
+  let resolveConfirmation, calls=0;
+  const h=harness(['原文'],async ()=>{calls++;});
+  h.sheet.UsedRange=h.context.Application.Selection;
+  h.api.setScopeConfirmationHandler(()=>new Promise(resolve=>{resolveConfirmation=resolve;}));
+  const pending=h.api.run({scope:'sheet'});
+  while(!resolveConfirmation) await Promise.resolve();
+  activateOtherWorkbook(h); h.api.syncWorkbook();
+  const newStatus=h.statuses.at(-1).text;
+  resolveConfirmation(true); await pending;
+  assert.equal(calls,0); assert.equal(h.issues.length,0);
+  assert.equal(h.statuses.at(-1).text,newStatus);
+});
+
+test('bulk corrections share one native transaction and observed undo restores history as a group', async () => {
+  const h=harness(['检查，，内容。。'],async ()=>{throw new Error('no model calls');});
+  const rules=loadRules(h); rules.importPack(fs.readFileSync(path.join(__dirname,'../rules/chinese-writing-basic.json'),'utf8'));
+  await h.api.run({rulesOnly:true}); h.api.applyAll();
+  assert.equal(h.ranges[0].Value2,'检查，内容。');
+  assert.deepEqual(h.undoRegistrations.map(x=>x.type),['begin','end']);
+  h.ranges[0].Value2='检查，，内容。。';
+  h.api.checkNativeUndo();
+  assert.equal(h.ranges[0].Value2,'检查，，内容。。');
+  assert.ok(h.api.getHistory().every(x=>x.status==='undone'));
+});
+
+test('unavailable native undo leaves a usable plugin history and an explicit fallback notice', async () => {
+  const h=harness(['原文'],async (_,prompt)=>reply(prompt,()=> '修改'));
+  delete h.context.Application.DebugTools;
+  await h.api.run(); h.api.apply(h.issues[0].id);
+  assert.match(h.statuses.at(-1).text,/原生撤销不可用/);
+  assert.equal(h.api.undo(h.api.getHistory()[0].id),true);
+});
+
+test('host tracking installs activation listeners once and observes native undo', async () => {
+  const h=harness(['原文'],async (_,prompt)=>reply(prompt,()=> '修改'));
+  const listeners={},intervals=[];
+  h.context.Application.ApiEvent={AddApiEventListener:(name,fn)=>{assert.equal(listeners[name],undefined);listeners[name]=fn;}};
+  h.context.setInterval=(fn,delay)=>{assert.equal(delay,400);intervals.push(fn);};
+  h.api.startHostTracking(); h.api.startHostTracking();
+  assert.deepEqual(Object.keys(listeners),['WorkbookActivate','WindowActivate']);
+  assert.equal(intervals.length,1);
+  await h.api.run(); h.api.apply(h.issues[0].id);
+  h.ranges[0].Value2='原文'; intervals[0]();
+  assert.equal(h.ranges[0].Value2,'原文');
+  const other=activateOtherWorkbook(h); listeners.WorkbookActivate();
+  assert.equal(h.issues.length,0);
+  other.restore(); listeners.WindowActivate(); assert.equal(h.issues[0].status,'reverted');
+});
 
 test('writes a correction with exact original whitespace and rejects later changes', async () => {
   const h = harness(['  疏散通到。  ','存在问提。'],async (_,prompt)=>reply(prompt,x=>x.replace('通到','通道').replace('问提','问题')));
@@ -252,14 +372,16 @@ test('undo refuses to write into a replacement worksheet with the same name', as
 test('rejects a workbook switch even when the replacement workbook has the same full path', async () => {
   const h=harness(['原文'],async (_,prompt)=>reply(prompt,()=> '修改'));
   await h.api.run();
+  const id=h.issues[0].id;
   const replacement={Value2:'原文',Formula:'原文',FormulaR1C1:'原文',Address:()=> 'A1'};
   const otherWorkbook={FullName:'book.xlsx',CodeName:'Book2',Windows:{Item:()=>({Hwnd:202})}};
   const otherSheet={Name:'Sheet1',CodeName:'OtherSheetCode',Index:1,Parent:otherWorkbook,Range:()=>replacement};
   otherWorkbook.Worksheets={Count:1,Item:()=>otherSheet};
   h.context.Application.ActiveWorkbook=otherWorkbook;
   h.context.Application.ActiveSheet=otherSheet;
-  h.api.locate(h.issues[0].id);
-  h.api.apply(h.issues[0].id);
+  h.api.locate(id);
+  h.api.apply(id);
+  assert.equal(h.issues.length,0);
   assert.equal(replacement.Value2,'原文');
   assert.match(h.statuses.at(-1).text,/单元格内容已变化/);
 });

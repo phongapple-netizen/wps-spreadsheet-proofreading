@@ -4,15 +4,81 @@
   var issues = [], history = [], timing = [];
   var activeRun = null, connectionBusy = false, rewriteState = null, scopeConfirmationHandler = null;
   var sequence = 0, lastOptions = null;
+  var workbookSessions = Object.create(null), currentWorkbookKey = "", hostTrackingStarted = false;
+  var lastStatus = { text: "请选择文本单元格开始校对", tone: "idle" }, nativeUndoActions = Object.create(null);
   var MAX_CELLS = 20000, MAX_CHARACTERS = 50000;
   function api() { return root.WpsSpreadsheet; }
   function core() { return root.WpsSpreadsheetProofreadingCore; }
   function textCore() { return root.WpsTextProofreadingCore; }
   function client() { return root.WpsSpreadsheetModelClient; }
   function emit(name, payload) { if (typeof root[name] === "function") root[name](payload); }
-  function status(text, tone) { emit("setSpreadsheetStatus", { text: text, tone: tone || "idle" }); }
+  function status(text, tone) { lastStatus = { text: text, tone: tone || "idle" }; emit("setSpreadsheetStatus", lastStatus); }
   function isBusy() { return !!activeRun; }
   function newId(prefix) { sequence++; return prefix + "-" + sequence; }
+  function syncWorkbook() {
+    var key = api().getWorkbookKey();
+    if (key === currentWorkbookKey) return false;
+    if (activeRun) {
+      activeRun.cancelled = true;
+      if (activeRun.controller) activeRun.controller.abort();
+      lastStatus = { text: "切换工作簿，已停止本次校对；可重新开始", tone: "idle" };
+      activeRun = null;
+    }
+    if (currentWorkbookKey) workbookSessions[currentWorkbookKey] = {
+      issues: issues, history: history, timing: timing, rewriteState: rewriteState, lastOptions: lastOptions, status: lastStatus
+    };
+    currentWorkbookKey = key;
+    var session = workbookSessions[key];
+    issues = session ? session.issues : []; history = session ? session.history : []; timing = session ? session.timing : [];
+    rewriteState = session ? session.rewriteState : null; lastOptions = session ? session.lastOptions : null;
+    lastStatus = session ? session.status : { text: key ? "当前工作簿尚未校对" : "请打开工作簿", tone: "idle" };
+    var name = "";
+    try { name = String(api().getActiveWorkbook().Name || ""); } catch (error) { /* no workbook */ }
+    emit("setSpreadsheetWorkbook", { key: key, name: name });
+    emit("setSpreadsheetBusy", false); emit("setSpreadsheetRewriteBusy", false);
+    emit("setSpreadsheetRewrite", rewriteState); emit("setSpreadsheetRewriteStatus", { text: "", tone: "idle" });
+    refresh(); emit("setSpreadsheetStatus", lastStatus);
+    return true;
+  }
+  function armNativeUndo(ids, available) {
+    if (!ids.length) return;
+    var changes = Object.create(null);
+    ids.forEach(function (id) {
+      var item = history.find(function (entry) { return entry.id === id; });
+      if (!changes[item.cellKey]) changes[item.cellKey] = { item: item, before: item.before };
+    });
+    nativeUndoActions[newId("undo")] = { workbookKey: currentWorkbookKey, ids: ids.slice(), changes: changes };
+    if (!available) status("修改已完成；WPS 原生撤销不可用，请在修改记录中撤销", "warning");
+  }
+  function checkNativeUndo() {
+    if (isBusy()) return;
+    // Observe native Undo without writing a second time. Only a complete match
+    // of the captured cells to their pre-action values updates our own history.
+    Object.keys(nativeUndoActions).reverse().forEach(function (token) {
+      var action = nativeUndoActions[token];
+      if (action.workbookKey !== currentWorkbookKey) return;
+      var records = action.ids.map(function (id) { return history.find(function (item) { return item.id === id; }); });
+      if (records.some(function (item) { return !item || item.status !== "applied"; })) { delete nativeUndoActions[token]; return; }
+      var restored = Object.keys(action.changes).every(function (key) {
+        var change = action.changes[key], info = api().readAddress(change.item.address, change.item.context);
+        return info && info.formulaKnown && !info.hasFormula && info.value === change.before;
+      });
+      if (!restored) return;
+      records.slice().reverse().forEach(function (item) { markUndone(item); });
+      delete nativeUndoActions[token];
+      refresh(); emit("setSpreadsheetRewrite", rewriteState); status("已撤销本次修改", "success");
+    });
+  }
+  function startHostTracking() {
+    if (hostTrackingStarted) return;
+    hostTrackingStarted = true;
+    syncWorkbook();
+    api().onWorkbookActivation(syncWorkbook);
+    if (typeof root.setInterval === "function") root.setInterval(function () {
+      syncWorkbook();
+      checkNativeUndo();
+    }, 400);
+  }
   function modelOptions() {
     return typeof root.getSpreadsheetModelOptions === "function" ? root.getSpreadsheetModelOptions() :
       { provider: "opencode", endpoint: "http://127.0.0.1:4097", model: "opencode/mimo-v2.6-flash-free" };
@@ -94,7 +160,7 @@
     return cells;
   }
 
-  function live(state) { return activeRun === state && !state.cancelled && !state.failed; }
+  function live(state) { syncWorkbook(); return activeRun === state && !state.cancelled && !state.failed; }
   function scopeConfirmationDetails(cells, scope) {
     var sheets = Object.create(null), characters = cells.reduce(function (total, cell) { return total + cell.value.length; }, 0);
     cells.forEach(function (cell) { sheets[cell.sheetName] = true; });
@@ -107,12 +173,15 @@
     }
     return { scope: scope, sheetCount: sheetCount, cellCount: cells.length, characterCount: characters };
   }
-  async function confirmModelScope(cells, scope) {
+  async function confirmModelScope(cells, scope, state) {
     if (scope === "selection") return true;
     if (typeof scopeConfirmationHandler === "function") {
       try {
-        if (await scopeConfirmationHandler(scopeConfirmationDetails(cells, scope)) === true) return true;
+        var authorized = await scopeConfirmationHandler(scopeConfirmationDetails(cells, scope));
+        if (!live(state)) return false;
+        if (authorized === true) return true;
       } catch (error) { /* a failed UI confirmation must not authorize sending */ }
+      if (!live(state)) return false;
       status("已取消校对，未发送表格文本", "idle");
       return false;
     }
@@ -131,7 +200,7 @@
     return false;
   }
   function record(state, stage, started, outcome) {
-    if (!state.options.timingLogs) return;
+    if (!state.options.timingLogs || state.workbookKey !== currentWorkbookKey) return;
     timing.push({ runId: state.id, stage: stage, durationMs: Math.max(0, Date.now() - started), outcome: outcome });
     timing = timing.slice(-500);
   }
@@ -206,8 +275,9 @@
     }, state.controller.signal, function () { state.failed = true; state.controller.abort(); });
   }
   async function run(options) {
+    syncWorkbook();
     if (isBusy()) return;
-    var state = { id: newId("run"), controller: typeof AbortController === "function" ? new AbortController() : null, cancelled: false, failed: false, rejected: 0 };
+    var state = { id: newId("run"), workbookKey: currentWorkbookKey, controller: typeof AbortController === "function" ? new AbortController() : null, cancelled: false, failed: false, rejected: 0 };
     activeRun = state;
     issues = [];
     emit("setSpreadsheetBusy", true); refresh(); status("正在读取表格范围…", "working");
@@ -218,7 +288,7 @@
       if (root.WpsRulesReady) await root.WpsRulesReady;
       if (!live(state)) throw new Error("校对已取消");
       var cells = readScope(state.options.scope);
-      if (!state.options.rulesOnly && !await confirmModelScope(cells, state.options.scope)) return;
+      if (!state.options.rulesOnly && !await confirmModelScope(cells, state.options.scope, state)) return;
       if (!live(state)) throw new Error("校对已取消");
       var locals = localIssues(cells, state);
       issues = locals; refresh();
@@ -242,6 +312,7 @@
       status(text, state.rejected ? "error" : (issues.length ? "success" : "idle"));
       record(state, 3, started, 0);
     } catch (error) {
+      if (activeRun !== state) return;
       var message = state.cancelled ? "校对已取消" : (error.message || String(error));
       if (issues.length) message += "；已保留 " + issues.length + " 条建议，本次范围尚未全部完成校对";
       status(message, state.cancelled ? "idle" : "error");
@@ -249,8 +320,7 @@
     } finally {
       state.failed = true;
       if (state.controller) state.controller.abort();
-      if (activeRun === state) activeRun = null;
-      emit("setSpreadsheetBusy", false); refresh();
+      if (activeRun === state) { activeRun = null; emit("setSpreadsheetBusy", false); refresh(); }
     }
   }
   function cancel() {
@@ -261,9 +331,10 @@
     if (activeRun.controller) activeRun.controller.abort();
   }
   function locate(id) {
+    syncWorkbook();
     if (isBusy()) return;
     var issue = issues.find(function (item) { return item.id === id; }) || history.find(function (item) { return item.id === id; });
-    if (issue && !api().selectAddress(issue.address, issue.context)) status("无法定位原单元格，请确认原工作簿和工作表仍然打开", "error");
+    if (!issue || !api().selectAddress(issue.address, issue.context)) status("无法定位原单元格，请确认原工作簿和工作表仍然打开", "error");
   }
   function rebase(key, before, after, start, end, length, acceptedId) {
     var delta = length - (end - start);
@@ -278,7 +349,8 @@
   }
   function applyInternal(id) {
     var issue = issues.find(function (item) { return item.id === id; });
-    if (!issue || issue.status !== "pending" || !issue.actionable) return { ok: false, reason: "该建议需要人工核对，不能直接修正" };
+    if (!issue) return { ok: false, reason: "单元格内容已变化，请重新校对。" };
+    if (issue.status !== "pending" || !issue.actionable) return { ok: false, reason: "该建议需要人工核对，不能直接修正" };
     var before = issue.cellOriginal;
     if (before.slice(issue.start, issue.end) !== issue.original) return { ok: false, reason: "建议位置已变化，请重新校对" };
     var after = before.slice(0, issue.start) + issue.suggestion + before.slice(issue.end);
@@ -292,7 +364,7 @@
     history.unshift({ id: newId("history"), issueId: issue.id, cellKey: issue.cellKey, address: issue.address, sheetName: issue.sheetName,
       workbookKey: issue.workbookKey, context: issue.context, original: issue.original, suggestion: issue.suggestion, before: before, after: after,
       start: issue.start, end: issue.end, status: "applied", time: new Date().toISOString() });
-    refresh(); return { ok: true };
+    refresh(); return { ok: true, nativeUndo: result.nativeUndo };
   }
   function advance() {
     if (lastOptions && lastOptions.autoAdvance) {
@@ -301,20 +373,26 @@
     }
   }
   function apply(id) {
+    syncWorkbook();
     if (isBusy()) return;
     var result = applyInternal(id);
     status(result.ok ? "单元格已修正" : result.reason, result.ok ? "success" : "error");
-    if (result.ok) advance();
+    if (result.ok) { advance(); armNativeUndo([history[0].id], result.nativeUndo); }
   }
   function applyAll() {
+    syncWorkbook();
     if (isBusy()) return;
     var candidates = issues.filter(function (issue) { return issue.status === "pending" && issue.autoFixable && !issue.needsReview && issue.actionable; });
-    var applied = 0, failed = 0;
-    candidates.forEach(function (issue) { if (applyInternal(issue.id).ok) applied++; else failed++; });
+    if (!candidates.length) { status("没有可一键修正的内置格式建议；自定义规则和 AI 建议需逐条确认", "idle"); return; }
+    var applied = 0, failed = 0, ids = [], transaction = api().beginNativeUndo();
+    var nativeUndo = false;
+    try { candidates.forEach(function (issue) { if (applyInternal(issue.id).ok) { applied++; ids.push(history[0].id); } else failed++; }); }
+    finally { nativeUndo = api().endNativeUndo(transaction); }
     status("已修正 " + applied + " 条低风险格式建议" + (failed ? "；" + failed + " 条无法写回，请重新校对" : ""), failed ? "error" : "success");
-    if (applied) advance();
+    if (applied) { advance(); armNativeUndo(ids, nativeUndo); }
   }
   function ignore(id) {
+    syncWorkbook();
     if (isBusy()) return;
     var issue = issues.find(function (item) { return item.id === id; });
     if (!issue || issue.status !== "pending") return;
@@ -323,24 +401,29 @@
       workbookKey: issue.workbookKey, context: issue.context, original: issue.original, suggestion: issue.suggestion, status: "ignored", time: new Date().toISOString() });
     refresh(); advance();
   }
+  function markUndone(item) {
+    rebase(item.cellKey, item.after, item.before, item.start, item.start + item.suggestion.length, item.original.length, item.issueId);
+    item.status = "undone";
+    var issue = issues.find(function (entry) { return entry.id === item.issueId; });
+    if (issue) issue.status = "reverted";
+    if (rewriteState && rewriteState.historyId === item.id) { rewriteState.status = "ready"; emit("setSpreadsheetRewrite", rewriteState); }
+  }
   function undo(id) {
+    syncWorkbook();
     if (isBusy()) return;
     var item = history.find(function (entry) { return entry.id === id; });
     if (!item || item.status !== "applied") return;
     var result = api().writeAddress(item.address, item.after, item.before, item.context, { allowEmpty: true });
     if (!result.ok) { status(result.reason, "error"); return false; }
-    rebase(item.cellKey, item.after, item.before, item.start, item.start + item.suggestion.length, item.original.length, item.issueId);
-    item.status = "undone";
-    var issue = issues.find(function (entry) { return entry.id === item.issueId; });
-    if (issue) issue.status = "reverted";
-    if (rewriteState && rewriteState.historyId === id) { rewriteState.status = "ready"; emit("setSpreadsheetRewrite", rewriteState); }
+    markUndone(item);
     refresh(); status("已撤销本次修改", "success"); return true;
   }
 
   async function runRewrite(options) {
+    syncWorkbook();
     if (isBusy()) return;
     options = options || {};
-    var state = { id: newId("rewrite"), mode: "rewrite", cancelled: false, failed: false, controller: typeof AbortController === "function" ? new AbortController() : null, options: runOptions() };
+    var state = { id: newId("rewrite"), workbookKey: currentWorkbookKey, mode: "rewrite", cancelled: false, failed: false, controller: typeof AbortController === "function" ? new AbortController() : null, options: runOptions() };
     activeRun = state;
     emit("setSpreadsheetRewriteBusy", true); emit("setSpreadsheetRewriteStatus", { text: "正在生成改写…", tone: "working" });
     try {
@@ -363,15 +446,16 @@
       emit("setSpreadsheetRewrite", rewriteState);
       emit("setSpreadsheetRewriteStatus", { text: risk.level === "blocked" ? "改写涉及关键事实变化，禁止替换" : "改写已生成，请核对后替换", tone: risk.level === "blocked" ? "error" : "success" });
     } catch (error) {
+      if (activeRun !== state) return;
       emit("setSpreadsheetRewriteStatus", { text: state.cancelled ? "已取消生成" : error.message, tone: state.cancelled ? "idle" : "error" });
     } finally {
       state.failed = true;
       if (state.controller) state.controller.abort();
-      if (activeRun === state) activeRun = null;
-      emit("setSpreadsheetRewriteBusy", false);
+      if (activeRun === state) { activeRun = null; emit("setSpreadsheetRewriteBusy", false); }
     }
   }
   function applyRewrite(options) {
+    syncWorkbook();
     if (isBusy() || !rewriteState || rewriteState.status !== "ready") return;
     var risk = rewriteState.risk;
     if (risk.level === "blocked" || (!risk.canReplace && !(risk.requiresConfirmation && options && options.riskConfirmed))) {
@@ -388,13 +472,15 @@
     rewriteState.status = "applied"; rewriteState.historyId = id;
     emit("setSpreadsheetRewrite", rewriteState); refresh();
     emit("setSpreadsheetRewriteStatus", { text: "已替换原单元格文本", tone: "success" });
+    armNativeUndo([id], result.nativeUndo);
   }
   function undoRewrite() {
+    syncWorkbook();
     if (!rewriteState || !rewriteState.historyId) return;
     if (!undo(rewriteState.historyId)) emit("setSpreadsheetRewriteStatus", { text: "无法撤销，请确认单元格仍保持本次改写后的内容", tone: "error" });
     else emit("setSpreadsheetRewriteStatus", { text: "已撤销本次改写", tone: "success" });
   }
-  function discardRewrite() { if (!isBusy()) { rewriteState = null; emit("setSpreadsheetRewrite", null); } }
+  function discardRewrite() { syncWorkbook(); if (!isBusy()) { rewriteState = null; emit("setSpreadsheetRewrite", null); } }
   async function testConnection(options) {
     if (isBusy() || connectionBusy) return;
     connectionBusy = true; emit("setSpreadsheetConnectionBusy", true);
@@ -409,6 +495,7 @@
     run: run, cancel: cancel, locate: locate, apply: apply, ignore: ignore, applyAll: applyAll, undo: undo,
     runRewrite: runRewrite, applyRewrite: applyRewrite, undoRewrite: undoRewrite, discardRewrite: discardRewrite, cancelRewrite: cancel,
     testConnection: testConnection, readScope: readScope, isBusy: isBusy,
+    syncWorkbook: syncWorkbook, startHostTracking: startHostTracking, checkNativeUndo: checkNativeUndo,
     setScopeConfirmationHandler: function (handler) { scopeConfirmationHandler = typeof handler === "function" ? handler : null; },
     getIssues: function () { return issues.slice(); }, getHistory: function () { return history.slice(); },
     getTimingRecords: function () { return timing.slice(); }, clearTimingRecords: function () { timing = []; }

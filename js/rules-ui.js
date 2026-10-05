@@ -90,7 +90,7 @@
         if (regexOptions) regexOptions.hidden = !(value === "regex" || aiRegex);
         if (autoFix) {
             if (value === "reminder" || aiReview) autoFix.checked = false;
-            autoFix.disabled = value === "reminder" || aiReview;
+            autoFix.disabled = true;
         }
         if (replacementLabel) {
             replacementLabel.textContent = aiReview ? "参考建议写法（可选）" : "建议写法";
@@ -129,7 +129,7 @@
             if (field) field.value = mapping[id];
         });
         var autoFix = byId("rule-auto-fix");
-        if (autoFix) autoFix.checked = value.autoFix === true;
+        if (autoFix) autoFix.checked = api().isSafeAutoFix(value);
         var deleteButton = byId("rule-delete");
         if (deleteButton) deleteButton.hidden = !value.id;
         syncEditorType();
