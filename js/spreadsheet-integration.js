@@ -5,7 +5,7 @@
   var activeRun = null, connectionBusy = false, rewriteState = null, scopeConfirmationHandler = null;
   var sequence = 0, lastOptions = null;
   var workbookSessions = Object.create(null), currentWorkbookKey = "", hostTrackingStarted = false;
-  var lastStatus = { text: "请选择文本单元格开始校对", tone: "idle" }, nativeUndoActions = Object.create(null);
+  var lastStatus = { text: "请选择文本单元格开始校对", tone: "idle" }, nativeUndoStacks = Object.create(null);
   var MAX_CELLS = 20000, MAX_CHARACTERS = 50000;
   function api() { return root.WpsSpreadsheet; }
   function core() { return root.WpsSpreadsheetProofreadingCore; }
@@ -40,34 +40,79 @@
     refresh(); emit("setSpreadsheetStatus", lastStatus);
     return true;
   }
-  function armNativeUndo(ids, available) {
+  function armNativeUndo(ids, available, reversed) {
     if (!ids.length) return;
+    if (!available) { status("修改已完成；WPS 原生撤销不可用，请在修改记录中撤销", "warning"); return; }
     var changes = Object.create(null);
-    ids.forEach(function (id) {
-      var item = history.find(function (entry) { return entry.id === id; });
-      if (!changes[item.cellKey]) changes[item.cellKey] = { item: item, before: item.before };
+    var records = ids.map(function (id) { return history.find(function (entry) { return entry.id === id; }); });
+    records.forEach(function (item) {
+      if (!changes[item.cellKey]) changes[item.cellKey] = { item: item, before: reversed ? item.after : item.before };
+      changes[item.cellKey].after = reversed ? item.before : item.after;
     });
-    nativeUndoActions[newId("undo")] = { workbookKey: currentWorkbookKey, ids: ids.slice(), changes: changes };
-    if (!available) status("修改已完成；WPS 原生撤销不可用，请在修改记录中撤销", "warning");
+    var stack = nativeUndoStacks[currentWorkbookKey] || (nativeUndoStacks[currentWorkbookKey] = { actions: [], recovery: null });
+    stack.actions.push({ records: records, changes: changes, reversed: !!reversed });
+    stack.recovery = null;
   }
   function checkNativeUndo() {
     if (isBusy()) return;
-    // Observe native Undo without writing a second time. Only a complete match
-    // of the captured cells to their pre-action values updates our own history.
-    Object.keys(nativeUndoActions).reverse().forEach(function (token) {
-      var action = nativeUndoActions[token];
-      if (action.workbookKey !== currentWorkbookKey) return;
-      var records = action.ids.map(function (id) { return history.find(function (item) { return item.id === id; }); });
-      if (records.some(function (item) { return !item || item.status !== "applied"; })) { delete nativeUndoActions[token]; return; }
-      var restored = Object.keys(action.changes).every(function (key) {
-        var change = action.changes[key], info = api().readAddress(change.item.address, change.item.context);
-        return info && info.formulaKnown && !info.hasFormula && info.value === change.before;
+    var stack = nativeUndoStacks[currentWorkbookKey];
+    if (!stack || !stack.actions.length) return;
+    var action = stack.actions[stack.actions.length - 1], values = Object.create(null);
+    function read(change, key) {
+      if (!Object.prototype.hasOwnProperty.call(values, key)) {
+        var info = api().readAddress(change.item.address, change.item.context);
+        values[key] = info && info.formulaKnown && !info.hasFormula ?
+          (info.value == null ? "" : typeof info.value === "string" ? info.value : null) : null;
+      }
+      return values[key];
+    }
+    var keys = Object.keys(action.changes);
+    // In the steady state read only the latest transaction, never the journal.
+    var unchanged = keys.every(function (key) { return read(action.changes[key], key) === action.changes[key].after; });
+    if (unchanged) { stack.recovery = null; return; }
+    var signature = JSON.stringify(keys.map(function (key) { return read(action.changes[key], key); }));
+    var recovery = stack.recovery;
+    if (!recovery || recovery.signature !== signature) recovery = stack.recovery = {
+      signature: signature, index: stack.actions.length - 1, targets: Object.create(null), count: 0, exhausted: false
+    };
+    if (recovery.exhausted) {
+      // An older cell may be restored after the latest cell has already jumped
+      // past its intermediate value. Watch just that one blocker, not history.
+      if (!recovery.watch || read(recovery.watch.change, recovery.watch.key) === recovery.watch.value) return;
+      recovery = stack.recovery = { signature: signature, index: stack.actions.length - 1,
+        targets: Object.create(null), count: 0, exhausted: false };
+    }
+    // Fast consecutive Undo may skip intermediate values of the same cell.
+    // Search at most eight older transactions per tick, only after divergence.
+    // Bound distinct recovery cells too; ambiguous changes require a new run.
+    for (var attempts = 0; attempts < 8 && recovery.index >= 0; attempts++) {
+      var candidate = stack.actions[recovery.index];
+      Object.keys(candidate.changes).forEach(function (key) { recovery.targets[key] = candidate.changes[key]; });
+      recovery.count++; recovery.index--;
+      var targetKeys = Object.keys(recovery.targets);
+      if (recovery.count > 1 && targetKeys.length > 32) break;
+      var mismatch = null;
+      var restored = targetKeys.every(function (key) {
+        var change = recovery.targets[key], value = read(change, key);
+        if (value === change.before) return true;
+        mismatch = { key: key, change: change, value: value }; return false;
       });
-      if (!restored) return;
-      records.slice().reverse().forEach(function (item) { markUndone(item); });
-      delete nativeUndoActions[token];
-      refresh(); emit("setSpreadsheetRewrite", rewriteState); status("已撤销本次修改", "success");
-    });
+      if (!restored) {
+        if (mismatch && keys.indexOf(mismatch.key) < 0) recovery.watch = mismatch;
+        continue;
+      }
+      var removed = stack.actions.splice(stack.actions.length - recovery.count);
+      removed.reverse().forEach(function (entry) {
+        entry.records.slice().reverse().forEach(function (item) { if (entry.reversed) markReapplied(item); else markUndone(item); });
+      });
+      stack.recovery = null;
+      refresh(); emit("setSpreadsheetRewrite", rewriteState); status("已同步 WPS 撤销后的修改记录", "success");
+      return;
+    }
+    if (recovery.index < 0 || Object.keys(recovery.targets).length > 32) {
+      recovery.exhausted = true;
+      status("单元格发生未确认的变化，撤销状态无法确认；请重新校对", "warning");
+    }
   }
   function startHostTracking() {
     if (hostTrackingStarted) return;
@@ -408,6 +453,13 @@
     if (issue) issue.status = "reverted";
     if (rewriteState && rewriteState.historyId === item.id) { rewriteState.status = "ready"; emit("setSpreadsheetRewrite", rewriteState); }
   }
+  function markReapplied(item) {
+    rebase(item.cellKey, item.before, item.after, item.start, item.end, item.suggestion.length, item.issueId);
+    item.status = "applied";
+    var issue = issues.find(function (entry) { return entry.id === item.issueId; });
+    if (issue) issue.status = "applied";
+    if (rewriteState && rewriteState.historyId === item.id) { rewriteState.status = "applied"; emit("setSpreadsheetRewrite", rewriteState); }
+  }
   function undo(id) {
     syncWorkbook();
     if (isBusy()) return;
@@ -416,7 +468,8 @@
     var result = api().writeAddress(item.address, item.after, item.before, item.context, { allowEmpty: true });
     if (!result.ok) { status(result.reason, "error"); return false; }
     markUndone(item);
-    refresh(); status("已撤销本次修改", "success"); return true;
+    refresh(); status("已撤销本次修改", "success");
+    armNativeUndo([item.id], result.nativeUndo, true); return true;
   }
 
   async function runRewrite(options) {

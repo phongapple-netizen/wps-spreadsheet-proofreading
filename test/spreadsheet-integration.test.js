@@ -115,6 +115,102 @@ test('observing native undo never updates another workbook history or writes its
   other.restore(); h.api.syncWorkbook(); assert.equal(h.api.getHistory()[0].status,'applied');
 });
 
+test('steady-state native undo checks read only the latest transaction after 100 corrections', async () => {
+  const h=harness(Array.from({length:100},(_,i)=>'原文'+i),async (_,prompt)=>reply(prompt,x=>x+'改'));
+  await h.api.run(); h.issues.forEach(issue=>h.api.apply(issue.id));
+  const host=h.context.WpsSpreadsheet, readAddress=host.readAddress;
+  let reads=0; host.readAddress=function(...args){reads++;return readAddress(...args);};
+  h.api.checkNativeUndo(); assert.equal(reads,1);
+  h.ranges[99].Value2='原文99'; reads=0; h.api.checkNativeUndo(); assert.equal(reads,1);
+  assert.equal(h.api.getHistory().filter(x=>x.status==='undone').length,1);
+  reads=0; h.api.checkNativeUndo(); assert.equal(reads,1);
+  assert.equal(h.api.getHistory()[1].status,'applied');
+});
+
+test('rapid consecutive same-cell native undo recovers skipped values over bounded ticks', async () => {
+  const h=harness(['原文'],async (_,prompt)=>reply(prompt,x=>x+'改'));
+  for(let i=0;i<12;i++){await h.api.run();h.api.apply(h.issues[0].id);}
+  const host=h.context.WpsSpreadsheet, readAddress=host.readAddress;
+  let reads=0; host.readAddress=function(...args){reads++;return readAddress(...args);};
+  h.ranges[0].Value2='原文';
+  h.api.checkNativeUndo(); assert.ok(h.api.getHistory().every(x=>x.status==='applied'));
+  h.api.checkNativeUndo(); assert.ok(h.api.getHistory().every(x=>x.status==='undone'));
+  assert.equal(reads,2); assert.equal(h.undoRegistrations.length,24);
+});
+
+test('recovery across more than 32 distinct cells stops with a warning instead of an unbounded scan', async () => {
+  const h=harness(Array.from({length:34},(_,i)=>'原文'+i),async (_,prompt)=>reply(prompt,x=>x+'改'));
+  await h.api.run(); h.issues.forEach(issue=>h.api.apply(issue.id));
+  await h.api.run(); h.api.apply(h.issues.find(x=>x.address==='A1').id);
+  h.ranges[0].Value2='原文0';
+  for(let i=0;i<5;i++)h.api.checkNativeUndo();
+  assert.match(h.statuses.at(-1).text,/撤销状态无法确认/);
+  assert.ok(h.api.getHistory().every(x=>x.status==='applied'));
+  const host=h.context.WpsSpreadsheet, readAddress=host.readAddress;
+  let reads=0; host.readAddress=function(...args){reads++;return readAddress(...args);};
+  h.api.checkNativeUndo(); assert.equal(reads,1);
+  assert.equal(h.undoRegistrations.length,70);
+});
+
+test('panel history undo followed by native undo reapplies the record and can undo the original next', async () => {
+  const h=harness(['原文'],async (_,prompt)=>reply(prompt,()=> '修改'));
+  await h.api.run(); h.api.apply(h.issues[0].id);
+  const id=h.api.getHistory()[0].id;
+  h.api.undo(id); assert.equal(h.api.getHistory()[0].status,'undone');
+  assert.equal(h.undoRegistrations.length,4);
+  h.ranges[0].Value2='修改'; h.api.checkNativeUndo();
+  assert.equal(h.api.getHistory()[0].status,'applied'); assert.equal(h.issues[0].status,'applied');
+  assert.equal(h.undoRegistrations.length,4);
+  h.ranges[0].Value2='原文'; h.api.checkNativeUndo();
+  assert.equal(h.api.getHistory()[0].status,'undone'); assert.equal(h.issues[0].status,'reverted');
+});
+
+test('unrecognized changes warn without silently changing history or repeatedly scanning old cells', async () => {
+  const h=harness(['原文一','原文二'],async (_,prompt)=>reply(prompt,x=>x+'改'));
+  await h.api.run(); h.issues.forEach(issue=>h.api.apply(issue.id));
+  h.ranges[1].Value2='用户编辑'; h.api.checkNativeUndo();
+  assert.ok(h.api.getHistory().every(x=>x.status==='applied'));
+  assert.match(h.statuses.at(-1).text,/撤销状态无法确认/);
+  const host=h.context.WpsSpreadsheet, readAddress=host.readAddress;
+  let reads=0; host.readAddress=function(...args){reads++;return readAddress(...args);};
+  h.api.checkNativeUndo(); assert.equal(reads,1);
+  assert.equal(h.ranges[1].Value2,'用户编辑');
+});
+
+test('rapid undo across cells confirms the entire skipped prefix before changing any history', async () => {
+  const h=harness(['甲','乙'],async (_,prompt)=>reply(prompt,x=>x+'改'));
+  await h.api.run(); h.api.apply(h.issues[0].id); h.api.apply(h.issues[1].id);
+  await h.api.run(); h.api.apply(h.issues.find(x=>x.address==='A1').id);
+  h.ranges[0].Value2='甲'; // Skip both A1 writes, but A2 has not yet been restored.
+  h.api.checkNativeUndo(); assert.ok(h.api.getHistory().every(x=>x.status==='applied'));
+  h.ranges[1].Value2='乙'; h.api.checkNativeUndo();
+  assert.ok(h.api.getHistory().every(x=>x.status==='undone'));
+});
+
+test('native undo of a panel undo synchronizes rewrite state without another host write', async () => {
+  const h=harness(['原文'],async ()=>JSON.stringify({rewrittenText:'改写',summary:'',warnings:[]}));
+  let rewrite; h.context.setSpreadsheetRewrite=x=>{rewrite=x;};
+  await h.api.runRewrite({}); h.api.applyRewrite({}); h.api.undoRewrite();
+  assert.equal(rewrite.status,'ready');
+  h.ranges[0].Value2='改写'; h.api.checkNativeUndo();
+  assert.equal(rewrite.status,'applied'); assert.equal(h.api.getHistory()[0].status,'applied');
+  assert.equal(h.undoRegistrations.length,4);
+});
+
+test('empty cells returned as null synchronize deletion and native undo of panel restoration', async () => {
+  const h=harness(['删除'],async (_,prompt)=>{
+    const result=JSON.parse(reply(prompt,()=>'')); result.issues[0].action='delete'; return JSON.stringify(result);
+  });
+  await h.api.run(); h.api.apply(h.issues[0].id);
+  const id=h.api.getHistory()[0].id;
+  assert.equal(h.ranges[0].Value2,'');
+  h.ranges[0].Value2=null; h.api.checkNativeUndo();
+  assert.equal(h.api.getHistory()[0].status,'applied');
+  h.api.undo(id); assert.equal(h.ranges[0].Value2,'删除');
+  h.ranges[0].Value2=null; h.api.checkNativeUndo();
+  assert.equal(h.api.getHistory()[0].status,'applied');
+});
+
 test('switching while authorization is pending prevents sending and preserves the new pane status', async () => {
   let resolveConfirmation, calls=0;
   const h=harness(['原文'],async ()=>{calls++;});
