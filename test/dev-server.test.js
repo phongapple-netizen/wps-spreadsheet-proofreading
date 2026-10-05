@@ -80,7 +80,7 @@ test('registration rejects malformed nonempty XML without backup or overwrite', 
 });
 
 test('publish.xml candidate paths include domestic, international, and legacy Mac locations', () => {
-  assert.deepEqual(resolvePublishPaths('win32',{APPDATA:'C:\\Users\\user\\AppData\\Roaming'},'C:\\Users\\user'),[path.join('C:\\Users\\user\\AppData\\Roaming','kingsoft','wps','jsaddons','publish.xml')]);
+  assert.deepEqual(resolvePublishPaths('win32',{APPDATA:'C:\\Users\\user\\AppData\\Roaming'},'C:\\Users\\user'),[path.win32.join('C:\\Users\\user\\AppData\\Roaming','kingsoft','wps','jsaddons','publish.xml')]);
   const mac=resolvePublishPaths('darwin',{},'/Users/user');
   assert.equal(mac[0],'/Users/user/Library/Containers/com.kingsoft.wpsoffice.mac/Data/.kingsoft/wps/jsaddons/publish.xml');
   assert.ok(mac.some(value=>value.includes('com.kingsoft.wpsoffice.mac.global')));

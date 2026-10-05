@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
 const manager = require('../scripts/opencode-manager.js');
+const resolveTestExecutable = () => 'opencode';
 
 test('OpenCode starts with fixed loopback binding, port, CORS origin, and project cwd', async t => {
   let checks=0;
@@ -12,6 +13,7 @@ test('OpenCode starts with fixed loopback binding, port, CORS origin, and projec
   child.kill=()=>{};
   t.after(()=>manager.stop());
   const result=await manager.start({
+    resolveExecutable:resolveTestExecutable,
     healthy:async()=>++checks > 1,
     spawn:(...values)=>{[command,args,options]=values;return child;}
   });
@@ -29,11 +31,11 @@ test('manager kills timed-out children and stale exits cannot clear a newer chil
     const child=new EventEmitter();
     child.killed=false;child.kill=()=>{child.killed=true;};children.push(child);return child;
   };
-  await assert.rejects(manager.start({healthy:async()=>false,spawn,timeoutMs:15}),/启动超时/);
+  await assert.rejects(manager.start({healthy:async()=>false,spawn,timeoutMs:15,resolveExecutable:resolveTestExecutable}),/启动超时/);
   const old=children[0];
   assert.equal(old.killed,true);
   let checks=0;
-  assert.deepEqual(await manager.start({healthy:async()=>++checks>1,spawn}),{ok:true,started:true});
+  assert.deepEqual(await manager.start({healthy:async()=>++checks>1,spawn,resolveExecutable:resolveTestExecutable}),{ok:true,started:true});
   const current=children[1];
   old.emit('exit',0);
   manager.stop();
@@ -43,6 +45,8 @@ test('manager kills timed-out children and stale exits cannot clear a newer chil
 test('Windows resolves a native executable and diagnoses npm command shims safely', () => {
   const native=manager.resolveExecutable('win32',{PATH:'C:\\tools;C:\\other'},{existsSync:file=>file==='C:\\other\\opencode.exe'});
   assert.equal(native,'C:\\other\\opencode.exe');
+  const npmNative = 'C:\\tools\\node_modules\\opencode-ai\\bin\\opencode.exe';
+  assert.equal(manager.resolveExecutable('win32',{PATH:'C:\\tools'},{existsSync:file=>file==='C:\\tools\\opencode.cmd'||file===npmNative}),npmNative);
   assert.throws(()=>manager.resolveExecutable('win32',{PATH:'C:\\tools'},{existsSync:file=>file.endsWith('opencode.cmd')}),/不会经 shell 执行/);
   assert.throws(()=>manager.resolveExecutable('win32',{PATH:'C:\\tools'},{existsSync:()=>false}),/未在 PATH/);
 });
@@ -53,7 +57,7 @@ test('manager accepts only loopback CORS origins and uses a supplied debug origi
   let checks=0;
   t.after(()=>manager.stop());
   await assert.rejects(manager.start({corsOrigin:'https://attacker.example',healthy:async()=>false,spawn:()=>child}),/本机 HTTP/);
-  const result=await manager.start({corsOrigin:'http://localhost:4300',healthy:async()=>++checks>1,spawn:(command,argv)=>{args=argv;return child;}});
+  const result=await manager.start({corsOrigin:'http://localhost:4300',healthy:async()=>++checks>1,resolveExecutable:resolveTestExecutable,spawn:(command,argv)=>{args=argv;return child;}});
   assert.deepEqual(result,{ok:true,started:true});
   assert.equal(args[args.indexOf('--cors')+1],'http://localhost:4300');
 });

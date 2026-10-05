@@ -54,7 +54,7 @@ async function start(testDeps) {
       if (error) reject(error); else resolve(value);
     };
     try {
-      const executable = resolveExecutable();
+      const executable = (testDeps && testDeps.resolveExecutable || resolveExecutable)();
       ownedChild = spawnProcess(executable, ['serve', '--hostname', HOST, '--port', String(PORT), '--cors', corsOrigin], {
         cwd: PROJECT_ROOT,
         shell: false,
@@ -87,7 +87,12 @@ function resolveExecutable(platform = process.platform, env = process.env, fileS
     const exe = windowsPath.join(directory, 'opencode.exe');
     if (fileSystem.existsSync(exe)) return exe;
     const cmd = windowsPath.join(directory, 'opencode.cmd');
-    if (fileSystem.existsSync(cmd)) commandShim.push(cmd);
+    if (fileSystem.existsSync(cmd)) {
+      // npm's launcher can point to an installed native binary; execute that directly.
+      const npmNative = windowsPath.join(directory, 'node_modules', 'opencode-ai', 'bin', 'opencode.exe');
+      if (fileSystem.existsSync(npmNative)) return npmNative;
+      commandShim.push(cmd);
+    }
   }
   if (commandShim.length) throw new Error('PATH 中的 opencode.cmd 是 npm 命令脚本，当前安全启动方式不会经 shell 执行它；请安装原生 opencode.exe 并加入 PATH');
   throw new Error('未在 PATH 中找到 opencode.exe，请安装 OpenCode 并将其加入 PATH');
