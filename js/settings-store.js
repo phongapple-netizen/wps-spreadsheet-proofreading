@@ -4,7 +4,7 @@
   var KEY = "wps_spreadsheet_settings_v1";
   var providers = ["opencode", "ollama", "openai"];
   var defaults = {
-    opencode: { endpoint: "http://127.0.0.1:4097", model: "opencode/mimo-v2.6-flash-free" },
+    opencode: { endpoint: "http://127.0.0.1:4096", model: "opencode/mimo-v2.6-flash-free" },
     ollama: { endpoint: "http://127.0.0.1:11434", model: "" },
     openai: { endpoint: "", model: "" }
   };

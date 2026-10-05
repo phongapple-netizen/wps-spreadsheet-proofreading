@@ -347,16 +347,16 @@
                         <strong>手工启动 OpenCode</strong>
                         <ol>
                             <li>在 Mac 终端或 Windows PowerShell 运行下面的命令。只打开 <code>opencode</code> 交互界面不会启动插件需要的服务。</li>
-                            <li><code class="opencode-start-command">opencode serve --hostname 127.0.0.1 --port 4097 --cors http://127.0.0.1:3892</code>保持终端窗口运行。</li>
-                            <li>在浏览器打开 <code>http://127.0.0.1:4097/global/health</code>，看到 <code>"healthy":true</code> 后，回到这里点击“检测并读取模型”。</li>
+                            <li><code class="opencode-start-command">opencode serve --pure --hostname 127.0.0.1 --port 4096 --cors http://127.0.0.1:3891 --cors http://127.0.0.1:3892</code>保持终端窗口运行；已有 4096 服务时无需再次启动。</li>
+                            <li>在浏览器打开 <code>http://127.0.0.1:4096/global/health</code>，看到 <code>"healthy":true</code> 后，回到这里点击“检测并读取模型”。</li>
                         </ol>
-                        <p>健康地址打不开：检查服务是否启动、端口是否为 4097。能打开但检测失败：检查启动命令是否带有上面的 <code>--cors</code> 参数；若设置过服务密码，也要在下方填写。</p>
+                        <p>默认复用文字版的 4096 服务，通过本机代理连接；若设置过服务密码，也要在下方填写。旧版保存的 4097 地址保持不变，如需共享，请手动改为 4096；其他地址需自行启动对应服务。</p>
                         </div>
                     </div>
 
                     <label id="model-endpoint-label" class="field-label" for="model-endpoint">OpenCode 服务地址</label>
-                    <input id="model-endpoint" class="field-control" type="url" value="http://127.0.0.1:4097"
-                           placeholder="http://127.0.0.1:4097" autocomplete="off" spellcheck="false">
+                    <input id="model-endpoint" class="field-control" type="url" value="http://127.0.0.1:4096"
+                           placeholder="http://127.0.0.1:4096" autocomplete="off" spellcheck="false">
 
                     <div class="model-label-row"><label id="model-name-label" class="field-label" for="model-suggestions">模型</label><button id="model-input-toggle" class="button button-text" type="button" aria-pressed="false">手动输入</button></div>
                     <div id="model-select-row"><select id="model-suggestions" class="field-control" aria-label="从已检测模型中选择">

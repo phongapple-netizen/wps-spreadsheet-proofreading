@@ -12,10 +12,10 @@ function loadStore() {
   return require('../js/settings-store.js');
 }
 
-test('settings default to local OpenCode 4097, selection scope and two workers', () => {
+test('settings default to local OpenCode 4096, selection scope and two workers', () => {
   const settings=loadStore().get();
   assert.equal(settings.provider,'opencode');
-  assert.equal(settings.endpoint,'http://127.0.0.1:4097');
+  assert.equal(settings.endpoint,'http://127.0.0.1:4096');
   assert.equal(settings.scope,'selection');
   assert.equal(settings.concurrency,2);
 });
@@ -37,7 +37,7 @@ test('settings flatten provider profiles and keep secrets and external endpoints
   assert.equal(settings.endpoint,'http://127.0.0.1:11434');
   assert.equal(settings.model,'');
   settings=store.update({provider:'opencode',scope:'workbook',autoAdvance:false,timingLogs:true,rulesOnly:true});
-  assert.equal(settings.endpoint,'http://127.0.0.1:4097');
+  assert.equal(settings.endpoint,'http://127.0.0.1:4096');
   assert.equal(settings.scope,'workbook');
   assert.equal(settings.autoAdvance,false);
   assert.equal(settings.timingLogs,true);
@@ -83,4 +83,18 @@ test('model catalog survives settings changes and reloads only for the matching 
   assert.ok(!global.localStorage.data[store.KEY].includes('secret'));
   reopened.saveCatalog('openai', 'https://external.example/v1', ['m1']);
   assert.ok(!global.localStorage.data[store.KEY].includes('external.example'));
+});
+
+test('shared default preserves existing 4097 profiles, model catalogs and custom addresses', () => {
+  const store=loadStore();
+  store.update({endpoint:'http://127.0.0.1:4097',model:'provider/previous'});
+  store.saveCatalog('opencode','http://127.0.0.1:4097',['provider/previous']);
+  delete require.cache[require.resolve('../js/settings-store.js')];
+  const reopened=require('../js/settings-store.js');
+  assert.equal(reopened.get().endpoint,'http://127.0.0.1:4097');
+  assert.equal(reopened.get().model,'provider/previous');
+  assert.deepEqual(reopened.loadCatalog('opencode','http://127.0.0.1:4097'),['provider/previous']);
+  reopened.update({endpoint:'http://localhost:4555',password:'runtime-secret'});
+  assert.equal(reopened.get().endpoint,'http://localhost:4555');
+  assert.equal(reopened.get().password,'runtime-secret');
 });

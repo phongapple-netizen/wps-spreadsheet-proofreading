@@ -4,9 +4,10 @@ const { spawn } = require('node:child_process');
 const http = require('node:http');
 const path = require('node:path');
 const fs = require('node:fs');
+const net = require('node:net');
 
 const HOST = '127.0.0.1';
-const PORT = 4097;
+const PORT = 4096;
 const CORS_ORIGIN = 'http://127.0.0.1:3892';
 const PROJECT_ROOT = path.resolve(__dirname, '..');
 let child = null;
@@ -17,14 +18,27 @@ function healthy(timeoutMs = 700) {
     const request = http.get({ hostname: HOST, port: PORT, path: '/global/health', timeout: timeoutMs }, response => {
       let body = '';
       response.setEncoding('utf8');
-      response.on('data', chunk => { body += chunk; });
+      response.on('error', () => resolve(false));
+      response.on('data', chunk => { body += chunk; if (body.length > 16384) request.destroy(); });
       response.on('end', () => {
-        try { resolve(response.statusCode >= 200 && response.statusCode < 300 && JSON.parse(body).healthy === true); }
+        try { const data = JSON.parse(body); resolve(response.statusCode >= 200 && response.statusCode < 300 && data.healthy === true && typeof data.version === 'string' && !!data.version); }
         catch (_) { resolve(false); }
       });
     });
+    const deadline = setTimeout(() => { request.destroy(); resolve(false); }, timeoutMs);
+    request.once('close', () => clearTimeout(deadline));
     request.on('timeout', () => { request.destroy(); resolve(false); });
     request.on('error', () => resolve(false));
+  });
+}
+
+function occupied() {
+  return new Promise(resolve => {
+    const socket = net.connect({ host: HOST, port: PORT });
+    const finish = value => { socket.destroy(); resolve(value); };
+    socket.setTimeout(700, () => finish(true));
+    socket.once('connect', () => finish(true));
+    socket.once('error', error => finish(error.code !== 'ECONNREFUSED'));
   });
 }
 
@@ -36,11 +50,22 @@ async function start(testDeps) {
   if (starting) return starting;
   if (await healthCheck()) return { ok: true, started: false };
   if (starting) return starting;
+  const portBusy = await (testDeps && testDeps.occupied || occupied)();
+  if (starting) return starting;
+  if (portBusy) {
+    // Another add-in may still be starting. Never kill or replace its process.
+    for (let attempt = 0; attempt < 5; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 200));
+      if (await healthCheck()) return { ok: true, started: false };
+    }
+    throw new Error('4096 已被占用或需要认证，请检查 OpenCode 服务和密码');
+  }
   starting = Promise.resolve().then(() => new Promise((resolve, reject) => {
     let settled = false;
     let poll;
     let deadline;
     let ownedChild = null;
+    let exited = false;
     const finish = (error, value) => {
       if (settled) return;
       settled = true;
@@ -50,26 +75,39 @@ async function start(testDeps) {
         if (child === ownedChild) child = null;
         try { ownedChild.kill(); } catch (_) { /* already exited */ }
       }
+      if (!error && ownedChild) ownedChild.unref?.();
       starting = null;
       if (error) reject(error); else resolve(value);
     };
     try {
       const executable = (testDeps && testDeps.resolveExecutable || resolveExecutable)();
-      ownedChild = spawnProcess(executable, ['serve', '--hostname', HOST, '--port', String(PORT), '--cors', corsOrigin], {
+      const origins = Array.from(new Set([corsOrigin, 'http://127.0.0.1:3891', CORS_ORIGIN]));
+      ownedChild = spawnProcess(executable, ['serve', '--pure', '--hostname', HOST, '--port', String(PORT), ...origins.flatMap(origin => ['--cors', origin])], {
         cwd: PROJECT_ROOT,
         shell: false,
         windowsHide: true,
+        detached: true,
         stdio: 'ignore'
       });
       child = ownedChild;
     } catch (error) { finish(error); return; }
     ownedChild.once('error', error => finish(new Error('无法启动 OpenCode，请确认已安装并可从 PATH 运行：' + error.message)));
-    ownedChild.once('exit', code => {
+    ownedChild.once('exit', async code => {
+      exited = true;
       if (child === ownedChild) child = null;
-      if (!settled) finish(new Error('OpenCode 服务提前退出（code ' + code + '）'));
+      if (!settled) {
+        for (let attempt = 0; attempt < 5 && !settled; attempt++) {
+          if (await healthCheck()) { ownedChild = null; finish(null, { ok: true, started: false }); return; }
+          await new Promise(resolve => setTimeout(resolve, 200));
+        }
+        if (!settled) finish(new Error('OpenCode 服务提前退出（code ' + code + '）'));
+      }
     });
     poll = setInterval(async () => {
-      if (await healthCheck()) finish(null, { ok: true, started: true });
+      if (await healthCheck()) {
+        if (exited) ownedChild = null;
+        finish(null, { ok: true, started: !exited });
+      }
     }, 250);
     deadline = setTimeout(() => finish(new Error('OpenCode 启动超时')), testDeps && testDeps.timeoutMs || 20000);
   }));
@@ -99,10 +137,9 @@ function resolveExecutable(platform = process.platform, env = process.env, fileS
 }
 
 function stop() {
-  if (!child) return;
-  const current = child;
+  // A healthy detached process is shared with other clients and outlives this
+  // web server. Only failed startup paths above may terminate our own child.
   child = null;
-  try { current.kill(); } catch (_) { /* already exited */ }
 }
 
 module.exports = { start, stop, healthy, resolveExecutable, HOST, PORT, PROJECT_ROOT };
