@@ -1,0 +1,44 @@
+name: Build macOS installer
+
+on:
+  pull_request:
+  workflow_call:
+    inputs:
+      release_ref:
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_ref || github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - name: Build universal DMG
+        run: npm run build:mac:installer
+      - name: Verify app self-test
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          mount="$(mktemp -d)"
+          hdiutil attach "dist/mac/WPS-表格校改-${version}-macOS.dmg" -mountpoint "$mount" -nobrowse -quiet
+          trap 'hdiutil detach "$mount" -quiet; rmdir "$mount"' EXIT
+          "$mount/WPS 表格校改.app/Contents/MacOS/WPSSpreadsheetProofreading" --self-test
+      - name: Prepare public asset
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          cp "dist/mac/WPS-表格校改-${version}-macOS.dmg" "dist/mac/WPS-Spreadsheet-Proofreading-${version}-macOS.dmg"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-installer
+          path: dist/mac/WPS-Spreadsheet-Proofreading-*-macOS.dmg
+          if-no-files-found: error
