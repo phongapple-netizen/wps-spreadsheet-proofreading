@@ -4,7 +4,7 @@
   function text(value) { return String(value == null ? "" : value); }
 
   function shouldIncludeCell(cell) {
-    if (!cell || cell.formulaKnown === false) return false;
+    if (!cell || cell.formulaKnown === false || cell.hasFormula === true) return false;
     var formula = text(cell.formula).trim();
     if (formula.charAt(0) === "=") return false;
     if (typeof cell.value !== "string") return false;
@@ -133,6 +133,7 @@
           segment.address = cell.address;
           segment.sheetName = cell.sheetName;
           segment.workbookKey = cell.workbookKey;
+          segment.context = cell.context;
           segment.cellOriginal = cell.value;
           segments.push(segment);
         });
@@ -168,12 +169,12 @@
       var first = segment.text.indexOf(issue.original);
       // Count overlapping matches too: ambiguous occurrences must never be written.
       if (first < 0 || segment.text.indexOf(issue.original, first + 1) >= 0 ||
-          (issue.actionable && issue.suggestion.trim().charAt(0) === "=")) {
+          (issue.actionable && /^[\s]*[=+\-@]/.test(issue.suggestion))) {
         rejectedCount++; return result;
       }
       result.push(Object.assign({}, issue, {
         cellKey: segment.cellKey, address: segment.address, sheetName: segment.sheetName,
-        workbookKey: segment.workbookKey, cellOriginal: segment.cellOriginal,
+        workbookKey: segment.workbookKey, context: segment.context, cellOriginal: segment.cellOriginal,
         start: segment.offset + first, end: segment.offset + first + issue.original.length,
         origin: "ai", autoFixable: false, status: "pending"
       }));

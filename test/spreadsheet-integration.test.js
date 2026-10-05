@@ -8,12 +8,15 @@ const core = require('../js/proofreading-core.js');
 function harness(values, request) {
   const statuses = [], busy = [];
   let issues = [];
-  const ranges = values.map(value=>({Value2:value,FormulaR1C1:value}));
-  const sheet = {Name:'Sheet1',Range:address=>ranges[Number(address.slice(1))-1]};
+  const ranges = values.map(value=>({Value2:value,Formula:value,FormulaR1C1:value}));
+  const workbook = {FullName:'book.xlsx',CodeName:'Book1',Windows:{Item:()=>({Hwnd:101})}};
+  const sheet = {Name:'Sheet1',CodeName:'SheetCode1',Index:1,Parent:workbook,Range:address=>ranges[Number(address.slice(1))-1]};
+  const sheets = [sheet];
+  workbook.Worksheets={Count:1,Item:id=>typeof id==='number'?sheets[id-1]:sheets.find(s=>s.Name===id)};
   const context = {
     AbortController,
     Application:{
-      ActiveWorkbook:{FullName:'book.xlsx',Worksheets:{Item:()=>sheet}},
+      ActiveWorkbook:workbook,
       ActiveSheet:sheet,
       Selection:{Rows:{Count:values.length},Columns:{Count:1},Item:r=>ranges[r-1]}
     },
@@ -26,10 +29,14 @@ function harness(values, request) {
     setSpreadsheetStatus:state=>statuses.push(state),
     setSpreadsheetBusy:state=>busy.push(state)
   };
-  ranges.forEach((range,i)=>{range.Address=()=>`A${i+1}`;});
+  ranges.forEach((range,i)=>{
+    range.Address=()=>`A${i+1}`;
+    range.Select=()=>{context.Application.Selection=range;};
+  });
+  sheet.Activate=()=>{context.Application.ActiveSheet=sheet;};
   ['wps-et-api.js','spreadsheet-integration.js'].forEach(file=>
     vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../js',file),'utf8'),context));
-  return {context,ranges,statuses,busy,get issues(){return issues;},api:context.WpsSpreadsheetIntegration};
+  return {context,workbook,sheet,sheets,ranges,statuses,busy,get issues(){return issues;},api:context.WpsSpreadsheetIntegration};
 }
 
 function reply(prompt, transform) {
@@ -110,16 +117,16 @@ test('refuses writes to formulas, other workbooks, or formula-shaped suggestions
   const h = harness(['原文'],async (_,prompt)=>reply(prompt,()=> '修改'));
   await h.api.run();
   const id=h.issues[0].id;
-  h.context.Application.ActiveWorkbook.FullName='another.xlsx';
-  h.api.apply(id);
-  assert.equal(h.ranges[0].Value2,'原文');
-  assert.match(h.statuses.at(-1).text,/其他工作簿/);
-  h.context.Application.ActiveWorkbook.FullName='book.xlsx';
   h.ranges[0].FormulaR1C1='="原文"';
   h.api.apply(id);
   assert.match(h.statuses.at(-1).text,/公式/);
   h.ranges[0].FormulaR1C1='原文';
-  const result=h.context.WpsSpreadsheet.writeAddress('A1','原文','=1+1','Sheet1','book.xlsx');
+  h.context.Application.ActiveWorkbook.FullName='another.xlsx';
+  h.api.apply(id);
+  assert.equal(h.ranges[0].Value2,'原文');
+  assert.match(h.statuses.at(-1).text,/单元格内容已变化/);
+  h.context.Application.ActiveWorkbook.FullName='book.xlsx';
+  const result=h.context.WpsSpreadsheet.writeAddress('A1','原文','=1+1',h.context.WpsSpreadsheet.captureContext());
   assert.equal(result.ok,false);
   assert.equal(h.ranges[0].Value2,'原文');
 });
@@ -127,8 +134,181 @@ test('refuses writes to formulas, other workbooks, or formula-shaped suggestions
 test('reports failure to locate instead of pretending success', async () => {
   const h = harness(['原文'],async (_,prompt)=>reply(prompt,()=> '修改'));
   await h.api.run();
+  h.sheets.splice(0,1);
+  h.workbook.Worksheets.Count=0;
   h.api.locate(h.issues[0].id);
   assert.match(h.statuses.at(-1).text,/无法定位/);
+});
+
+test('retains the original worksheet when another sheet with the same tab name replaces it', async () => {
+  const h=harness(['原文'],async (_,prompt)=>reply(prompt,()=> '修改'));
+  await h.api.run();
+  const original=h.ranges[0];
+  const replacement={Value2:'原文',Formula:'原文',FormulaR1C1:'原文',Address:()=> 'A1'};
+  const replacementSheet={Name:'Sheet1',CodeName:'ReplacementCode',Index:1,Parent:h.workbook,Range:()=>replacement};
+  h.sheets[0]=replacementSheet;
+  h.api.locate(h.issues[0].id);
+  assert.match(h.statuses.at(-1).text,/无法定位/);
+  h.api.apply(h.issues[0].id);
+  assert.equal(original.Value2,'原文');
+  assert.equal(replacement.Value2,'原文');
+  assert.match(h.statuses.at(-1).text,/单元格内容已变化/);
+});
+
+test('undo refuses to write into a replacement worksheet with the same name', async () => {
+  const h=harness(['原文'],async (_,prompt)=>reply(prompt,()=> '修改'));
+  await h.api.run();
+  h.api.apply(h.issues[0].id);
+  const history=h.api.getHistory()[0];
+  assert.equal(h.ranges[0].Value2,'修改');
+  const replacement={Value2:'修改',Formula:'修改',FormulaR1C1:'修改',Address:()=> 'A1'};
+  h.sheets[0]={Name:'Sheet1',CodeName:'ReplacementCode',Index:1,Parent:h.workbook,Range:()=>replacement};
+  assert.equal(h.api.undo(history.id),false);
+  assert.equal(h.ranges[0].Value2,'修改');
+  assert.equal(replacement.Value2,'修改');
+});
+
+test('rejects a workbook switch even when the replacement workbook has the same full path', async () => {
+  const h=harness(['原文'],async (_,prompt)=>reply(prompt,()=> '修改'));
+  await h.api.run();
+  const replacement={Value2:'原文',Formula:'原文',FormulaR1C1:'原文',Address:()=> 'A1'};
+  const otherWorkbook={FullName:'book.xlsx',CodeName:'Book2',Windows:{Item:()=>({Hwnd:202})}};
+  const otherSheet={Name:'Sheet1',CodeName:'OtherSheetCode',Index:1,Parent:otherWorkbook,Range:()=>replacement};
+  otherWorkbook.Worksheets={Count:1,Item:()=>otherSheet};
+  h.context.Application.ActiveWorkbook=otherWorkbook;
+  h.context.Application.ActiveSheet=otherSheet;
+  h.api.locate(h.issues[0].id);
+  h.api.apply(h.issues[0].id);
+  assert.equal(replacement.Value2,'原文');
+  assert.match(h.statuses.at(-1).text,/单元格内容已变化/);
+});
+
+test('skips a formula even when formula text looks like an ordinary value', async () => {
+  let calls=0;
+  const h=harness(['普通文本','显示结果'],async (_,prompt)=>{calls++;return reply(prompt,()=> '建议');});
+  h.ranges[1].Formula='显示结果';
+  h.ranges[1].FormulaR1C1='显示结果';
+  h.ranges[1].HasFormula=true;
+  await h.api.run();
+  assert.equal(calls,1);
+  assert.equal(h.issues.length,1);
+  assert.equal(h.issues[0].address,'A1');
+  assert.equal(h.context.WpsSpreadsheet.readCell(h.ranges[1]).hasFormula,true);
+  const result=h.context.WpsSpreadsheet.writeAddress('A2','显示结果','修改',h.context.WpsSpreadsheet.captureContext());
+  assert.equal(result.ok,false);
+  assert.match(result.reason,/公式/);
+  assert.equal(h.ranges[1].Value2,'显示结果');
+});
+
+test('skips cells when no formula-state property can be read', async () => {
+  let calls=0;
+  const h=harness(['不可确认'],async ()=>{calls++;return '{"issues":[]}';});
+  for(const property of ['Formula','FormulaR1C1','HasFormula']) {
+    Object.defineProperty(h.ranges[0],property,{configurable:true,get(){throw new Error('unavailable');}});
+  }
+  await h.api.run();
+  assert.equal(calls,0);
+  assert.match(h.statuses.at(-1).text,/没有可校对的文本/);
+  const result=h.context.WpsSpreadsheet.writeAddress('A1','不可确认','修改',h.context.WpsSpreadsheet.captureContext());
+  assert.equal(result.ok,false);
+  assert.equal(h.ranges[0].Value2,'不可确认');
+});
+
+test('records Formula and FormulaR1C1 independently', () => {
+  const h=harness(['计算结果'],async ()=>'{"issues":[]}');
+  h.ranges[0].Formula='=1+1';
+  h.ranges[0].FormulaR1C1='=RC[1]+RC[2]';
+  const info=h.context.WpsSpreadsheet.readCell(h.ranges[0]);
+  assert.equal(info.formula,'=1+1');
+  assert.equal(info.formulaR1C1,'=RC[1]+RC[2]');
+  assert.equal(info.hasFormula,true);
+  assert.equal(info.formulaKnown,true);
+});
+
+test('normalizes only valid single-cell A1 addresses', () => {
+  const h=harness(['原文'],async ()=>'{"issues":[]}');
+  const normalize=h.context.WpsSpreadsheet.normalizeAddress;
+  assert.equal(normalize('$b$3'),'B3');
+  assert.equal(normalize('$XFD$1048576'),'XFD1048576');
+  for(const address of ['A0','XFE1','A1048577','A1:B2','Sheet1!A1','A']) assert.equal(normalize(address),'',address);
+});
+
+test('asks before sending sheet or workbook text and does not ask for local-only checks', async () => {
+  let calls=0, promptText='';
+  const h=harness(['范围内文本'],async (_,prompt)=>{calls++;promptText=prompt;return '{"issues":[]}';});
+  h.sheet.UsedRange=h.context.Application.Selection;
+  let confirmations=0;
+  await h.api.run({scope:'sheet'});
+  assert.equal(calls,0);
+  assert.match(h.statuses.at(-1).text,/无法确认范围授权/);
+  assert.equal(h.api.isBusy(),false);
+  h.context.confirm=message=>{confirmations++;assert.match(message,/1 个单元格/);return false;};
+  await h.api.run({scope:'sheet'});
+  assert.equal(calls,0);
+  assert.match(h.statuses.at(-1).text,/未发送表格文本/);
+  h.context.confirm=message=>{confirmations++;assert.match(message,/当前工作表/);return true;};
+  await h.api.run({scope:'sheet'});
+  assert.equal(calls,1);
+  assert.equal(confirmations,2);
+  assert.ok(!promptText.includes('ReplacementCode'));
+  assert.ok(!promptText.includes('SheetCode1'));
+  assert.ok(!promptText.includes('book.xlsx'));
+  h.context.confirm=message=>{confirmations++;assert.match(message,/敏感内容/);return false;};
+  await h.api.run({scope:'workbook'});
+  assert.equal(calls,1);
+  assert.match(h.statuses.at(-1).text,/未发送表格文本/);
+  h.context.confirm=message=>{confirmations++;assert.match(message,/当前工作簿/);return true;};
+  await h.api.run({scope:'workbook'});
+  assert.equal(calls,2);
+  assert.equal(confirmations,4);
+  await h.api.run({scope:'sheet',rulesOnly:true});
+  await h.api.run({scope:'workbook',rulesOnly:true});
+  assert.equal(calls,2);
+  assert.equal(confirmations,4);
+});
+
+test('blocks every formula-shaped replacement prefix at the host write boundary', () => {
+  const h=harness(['原文'],async ()=>'{"issues":[]}');
+  const context=h.context.WpsSpreadsheet.captureContext();
+  for(const suggestion of ['=SUM(A1:A2)','+1','-1','@SUM(A1:A2)','  =SUM(A1:A2)']) {
+    const result=h.context.WpsSpreadsheet.writeAddress('A1','原文',suggestion,context);
+    assert.equal(result.ok,false,suggestion);
+    assert.equal(h.ranges[0].Value2,'原文');
+  }
+  for(const suggestion of ['安全生产+应急管理','user@example.com']) {
+    const result=h.context.WpsSpreadsheet.writeAddress('A1','原文',suggestion,context);
+    assert.equal(result.ok,true,suggestion);
+    h.ranges[0].Value2='原文';
+  }
+});
+
+test('rewrite apply and undo use the captured worksheet identity', async () => {
+  const original='现场存在安全隐患，检查后及时处理。';
+  const suggestion='现场存在安全隐患。检查后及时处理。';
+  const answer=async ()=>JSON.stringify({rewrittenText:suggestion,summary:['调整句子层次']});
+  const first=harness([original],answer);
+  first.context.setSpreadsheetRewrite=()=>{};
+  first.context.setSpreadsheetRewriteStatus=()=>{};
+  await first.api.runRewrite();
+  const replacement={Value2:original,Formula:original,FormulaR1C1:original,Address:()=> 'A1'};
+  first.sheets[0]={Name:'Sheet1',CodeName:'ReplacementCode',Index:1,Parent:first.workbook,Range:()=>replacement};
+  first.api.applyRewrite({riskConfirmed:true});
+  assert.equal(first.ranges[0].Value2,original);
+  assert.equal(replacement.Value2,original);
+
+  const second=harness([original],answer);
+  let preview;
+  second.context.setSpreadsheetRewrite=value=>{preview=value;};
+  second.context.setSpreadsheetRewriteStatus=()=>{};
+  await second.api.runRewrite();
+  second.api.applyRewrite({riskConfirmed:true});
+  assert.equal(second.ranges[0].Value2,suggestion);
+  const replacementAfter={Value2:suggestion,Formula:suggestion,FormulaR1C1:suggestion,Address:()=> 'A1'};
+  second.sheets[0]={Name:'Sheet1',CodeName:'ReplacementCode',Index:1,Parent:second.workbook,Range:()=>replacementAfter};
+  second.api.undoRewrite();
+  assert.equal(second.ranges[0].Value2,suggestion);
+  assert.equal(replacementAfter.Value2,suggestion);
+  assert.ok(preview);
 });
 
 test('unsupported cancellation runtimes fail before sending and restore the interface', async () => {
@@ -215,6 +395,7 @@ test('explicit deletion can empty a cell and the history can restore it', async 
   await h.api.run();
   h.api.apply(h.issues[0].id);
   assert.equal(h.ranges[0].Value2,'');
+  h.ranges[0].Value2=null;
   h.api.undo(h.api.getHistory()[0].id);
   assert.equal(h.ranges[0].Value2,'删除内容');
 });
@@ -235,9 +416,11 @@ test('workbook scope distinguishes sheets sharing A1', async () => {
   const first=h.context.Application.ActiveSheet;
   first.UsedRange=h.context.Application.Selection;
   const range={Value2:'乙问提',FormulaR1C1:'乙问提',Address:()=> 'A1'};
-  const second={Name:'Sheet2',Range:()=>range,UsedRange:{Rows:{Count:1},Columns:{Count:1},Item:()=>range}};
+  const second={Name:'Sheet2',CodeName:'SheetCode2',Index:2,Parent:h.workbook,Range:()=>range,UsedRange:{Rows:{Count:1},Columns:{Count:1},Item:()=>range},Activate:()=>{h.context.Application.ActiveSheet=second;}};
+  range.Select=()=>{h.context.Application.Selection=range;};
   const sheets=[first,second];
   h.context.Application.ActiveWorkbook.Worksheets={Count:2,Item:id=>typeof id==='number'?sheets[id-1]:sheets.find(s=>s.Name===id)};
+  h.context.confirm=()=>true;
   await h.api.run({scope:'workbook'});
   assert.equal(h.issues.length,2);
   h.api.apply(h.issues.find(x=>x.sheetName==='Sheet2').id);

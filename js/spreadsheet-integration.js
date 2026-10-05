@@ -31,6 +31,7 @@
     scope = scope || "selection";
     var workbookKey = api().getWorkbookKey();
     if (!workbookKey) throw new Error("无法确认原工作簿或工作表，请重新打开表格后再试");
+    var workbook = api().getActiveWorkbook();
     var targets = [], activeSheet = api().getActiveSheet();
     if (scope === "selection") {
       var selection = api().getSelection();
@@ -44,7 +45,6 @@
       if (!activeSheet) throw new Error("找不到当前工作表");
       targets.push({ sheet: activeSheet, range: activeSheet.UsedRange });
     } else if (scope === "workbook") {
-      var workbook = api().getActiveWorkbook();
       var sheets = workbook && workbook.Worksheets;
       if (!sheets || !Number.isInteger(Number(sheets.Count))) throw new Error("无法读取工作簿的工作表列表");
       for (var s = 1; s <= Number(sheets.Count); s++) {
@@ -54,8 +54,10 @@
     } else throw new Error("请选择有效的校对范围");
     var count = 0, characters = 0, cells = [], seen = Object.create(null);
     targets.forEach(function (target) {
-      var sheetName = target.sheet && String(target.sheet.Name || "");
-      if (!sheetName) throw new Error("无法确认原工作簿或工作表，请重新打开表格后再试");
+      var context;
+      try { context = api().captureContext(workbook, target.sheet); }
+      catch (error) { throw new Error("无法确认原工作簿或工作表，请重新打开表格后再试"); }
+      var sheetName = context.sheetName;
       var range = target.range;
       if (!range) throw new Error("无法读取工作表使用区域，请检查 WPS 表格 API");
       var rows = Number(range.Rows && range.Rows.Count), cols = Number(range.Columns && range.Columns.Count);
@@ -74,7 +76,11 @@
           if (!info) throw new Error("无法读取单元格，请检查 WPS 表格 API");
           if (!core().shouldIncludeCell(info)) continue;
           if (!/^[A-Z]+[1-9]\d*$/i.test(info.address)) throw new Error("无法识别单元格地址，请检查 WPS 表格 API");
-          var item = { address: info.address.toUpperCase(), value: info.value, formula: info.formula, sheetName: sheetName, workbookKey: workbookKey };
+          var item = {
+            address: info.address.toUpperCase(), value: info.value, formula: info.formula,
+            formulaR1C1: info.formulaR1C1, formulaKnown: info.formulaKnown, hasFormula: info.hasFormula,
+            sheetName: sheetName, workbookKey: workbookKey, context: context
+          };
           var key = core().cellKey(item);
           if (seen[key]) continue;
           seen[key] = true;
@@ -89,6 +95,30 @@
   }
 
   function live(state) { return activeRun === state && !state.cancelled && !state.failed; }
+  function confirmModelScope(cells, scope) {
+    if (scope === "selection") return true;
+    if (typeof root.confirm !== "function") {
+      status("当前环境无法确认范围授权，未发送表格文本", "error");
+      return false;
+    }
+    var sheets = Object.create(null), characters = cells.reduce(function (total, cell) { return total + cell.value.length; }, 0);
+    cells.forEach(function (cell) { sheets[cell.sheetName] = true; });
+    var sheetCount = Object.keys(sheets).length;
+    if (scope === "workbook" && cells[0].context && cells[0].context.workbook) {
+      try {
+        var workbookSheetCount = Number(cells[0].context.workbook.Worksheets.Count);
+        if (Number.isInteger(workbookSheetCount) && workbookSheetCount > 0) sheetCount = workbookSheetCount;
+      } catch (error) { /* the captured text-scope count remains a safe fallback */ }
+    }
+    var message = scope === "workbook" ?
+      "将把当前工作簿中 " + sheetCount + " 个工作表的可校对文本（" + cells.length + " 个单元格，共 " + characters + " 个字符）发送给所选模型。\n请确认工作簿中没有不希望发送给模型的敏感内容。\n公式、数字和空单元格会自动跳过。\n是否继续？" :
+      "将把当前工作表中的可校对文本（" + cells.length + " 个单元格，共 " + characters + " 个字符）发送给所选模型进行校对。\n公式、数字和空单元格会自动跳过。\n是否继续？";
+    try {
+      if (root.confirm(message) === true) return true;
+    } catch (error) { /* a missing or failed native prompt must not authorize sending */ }
+    status("已取消校对，未发送表格文本", "idle");
+    return false;
+  }
   function record(state, stage, started, outcome) {
     if (!state.options.timingLogs) return;
     timing.push({ runId: state.id, stage: stage, durationMs: Math.max(0, Date.now() - started), outcome: outcome });
@@ -106,7 +136,8 @@
       rules.evaluate(cell.value, 0).forEach(function (issue) {
         result.push(decorate(Object.assign({}, issue, {
           cellKey: core().cellKey(cell), cellOriginal: cell.value, address: cell.address, sheetName: cell.sheetName,
-          workbookKey: cell.workbookKey, action: !issue.actionable ? "review" : (issue.suggestion === "" ? "delete" : "replace")
+          workbookKey: cell.workbookKey, context: cell.context,
+          action: !issue.actionable ? "review" : (issue.suggestion === "" ? "delete" : "replace")
         }), state));
       });
     });
@@ -176,6 +207,7 @@
       if (root.WpsRulesReady) await root.WpsRulesReady;
       if (!live(state)) throw new Error("校对已取消");
       var cells = readScope(state.options.scope);
+      if (!state.options.rulesOnly && !confirmModelScope(cells, state.options.scope)) return;
       var locals = localIssues(cells, state);
       issues = locals; refresh();
       if (!state.options.rulesOnly) {
@@ -219,7 +251,7 @@
   function locate(id) {
     if (isBusy()) return;
     var issue = issues.find(function (item) { return item.id === id; }) || history.find(function (item) { return item.id === id; });
-    if (issue && !api().selectAddress(issue.address, issue.sheetName, issue.workbookKey)) status("无法定位原单元格，请确认原工作簿和工作表仍然打开", "error");
+    if (issue && !api().selectAddress(issue.address, issue.context)) status("无法定位原单元格，请确认原工作簿和工作表仍然打开", "error");
   }
   function rebase(key, before, after, start, end, length, acceptedId) {
     var delta = length - (end - start);
@@ -238,7 +270,7 @@
     var before = issue.cellOriginal;
     if (before.slice(issue.start, issue.end) !== issue.original) return { ok: false, reason: "建议位置已变化，请重新校对" };
     var after = before.slice(0, issue.start) + issue.suggestion + before.slice(issue.end);
-    var result = api().writeAddress(issue.address, before, after, issue.sheetName, issue.workbookKey, { allowEmpty: issue.action === "delete" });
+    var result = api().writeAddress(issue.address, before, after, issue.context, { allowEmpty: issue.action === "delete" });
     if (!result.ok) {
       if (/内容已变化|找不到|无法确认/.test(result.reason || "")) issue.status = "stale";
       refresh(); return result;
@@ -246,7 +278,7 @@
     issue.status = "applied";
     rebase(issue.cellKey, before, after, issue.start, issue.end, issue.suggestion.length, issue.id);
     history.unshift({ id: newId("history"), issueId: issue.id, cellKey: issue.cellKey, address: issue.address, sheetName: issue.sheetName,
-      workbookKey: issue.workbookKey, original: issue.original, suggestion: issue.suggestion, before: before, after: after,
+      workbookKey: issue.workbookKey, context: issue.context, original: issue.original, suggestion: issue.suggestion, before: before, after: after,
       start: issue.start, end: issue.end, status: "applied", time: new Date().toISOString() });
     refresh(); return { ok: true };
   }
@@ -276,14 +308,14 @@
     if (!issue || issue.status !== "pending") return;
     issue.status = "ignored";
     history.unshift({ id: newId("history"), issueId: issue.id, cellKey: issue.cellKey, address: issue.address, sheetName: issue.sheetName,
-      workbookKey: issue.workbookKey, original: issue.original, suggestion: issue.suggestion, status: "ignored", time: new Date().toISOString() });
+      workbookKey: issue.workbookKey, context: issue.context, original: issue.original, suggestion: issue.suggestion, status: "ignored", time: new Date().toISOString() });
     refresh(); advance();
   }
   function undo(id) {
     if (isBusy()) return;
     var item = history.find(function (entry) { return entry.id === id; });
     if (!item || item.status !== "applied") return;
-    var result = api().writeAddress(item.address, item.after, item.before, item.sheetName, item.workbookKey, { allowEmpty: true });
+    var result = api().writeAddress(item.address, item.after, item.before, item.context, { allowEmpty: true });
     if (!result.ok) { status(result.reason, "error"); return false; }
     rebase(item.cellKey, item.after, item.before, item.start, item.start + item.suggestion.length, item.original.length, item.issueId);
     item.status = "undone";
@@ -304,7 +336,7 @@
       var cells = options.regenerate && rewriteState ? [rewriteState.cell] : readScope("selection");
       if (cells.length !== 1) throw new Error("改写每次只处理一个文本单元格，请重新选择");
       var cell = cells[0];
-      var current = api().readAddress(cell.address, cell.sheetName, cell.workbookKey);
+      var current = api().readAddress(cell.address, cell.context);
       if (!current || current.value !== cell.value || !core().shouldIncludeCell(current)) throw new Error("原单元格内容或工作簿已变化，请重新选择");
       var original = root.WpsRewriteCore.validateRewriteSelection(cell.value);
       state.model = Object.assign({}, modelOptions(), { signal: state.controller.signal });
@@ -314,7 +346,7 @@
       if (parsed.rewrittenText === original) throw new Error("模型没有提供不同的改写，请调整要求后重试");
       var comparison = root.WpsRewriteCore.compareRewriteGuards(root.WpsRewriteCore.extractRewriteGuards(original), parsed.rewrittenText);
       var risk = root.WpsRewriteCore.summarizeRewriteRisk(comparison, parsed.warnings);
-      if (parsed.rewrittenText.trim().charAt(0) === "=") risk = { level: "blocked", title: "禁止将文本改写成公式", details: [], requiresConfirmation: false, canReplace: false };
+      if (/^[\s]*[=+\-@]/.test(parsed.rewrittenText)) risk = { level: "blocked", title: "禁止将文本改写成公式", details: [], requiresConfirmation: false, canReplace: false };
       rewriteState = { original: original, suggestion: parsed.rewrittenText, summary: parsed.summary, risk: risk, status: "ready", address: cell.address, sheetName: cell.sheetName, cell: cell };
       emit("setSpreadsheetRewrite", rewriteState);
       emit("setSpreadsheetRewriteStatus", { text: risk.level === "blocked" ? "改写涉及关键事实变化，禁止替换" : "改写已生成，请核对后替换", tone: risk.level === "blocked" ? "error" : "success" });
@@ -334,10 +366,10 @@
       emit("setSpreadsheetRewriteStatus", { text: "请先核对改写风险，关键事实变化的结果禁止替换", tone: "error" }); return;
     }
     var cell = rewriteState.cell;
-    var result = api().writeAddress(cell.address, rewriteState.original, rewriteState.suggestion, cell.sheetName, cell.workbookKey);
+    var result = api().writeAddress(cell.address, rewriteState.original, rewriteState.suggestion, cell.context);
     if (!result.ok) { emit("setSpreadsheetRewriteStatus", { text: result.reason, tone: "error" }); return; }
     var id = newId("history");
-    history.unshift({ id: id, cellKey: core().cellKey(cell), address: cell.address, sheetName: cell.sheetName, workbookKey: cell.workbookKey,
+    history.unshift({ id: id, cellKey: core().cellKey(cell), address: cell.address, sheetName: cell.sheetName, workbookKey: cell.workbookKey, context: cell.context,
       original: rewriteState.original, suggestion: rewriteState.suggestion, before: rewriteState.original, after: rewriteState.suggestion,
       start: 0, end: rewriteState.original.length, status: "applied", time: new Date().toISOString(), kind: "rewrite" });
     rebase(core().cellKey(cell), rewriteState.original, rewriteState.suggestion, 0, rewriteState.original.length, rewriteState.suggestion.length);

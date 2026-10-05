@@ -31,10 +31,68 @@
     catch (error) { return null; }
   }
 
-  function getWorkbookKey() {
-    var workbook = getActiveWorkbook();
+  function workbookKey(workbook) {
     if (!workbook) return "";
-    try { return String(workbook.FullName || workbook.Name || ""); } catch (error) { return ""; }
+    try {
+      var name = String(workbook.FullName || "");
+      var handle = Number(workbook.Windows.Item(1).Hwnd);
+      return name && Number.isFinite(handle) && handle > 0 ? name + "|" + handle : "";
+    } catch (error) { return ""; }
+  }
+
+  function getWorkbookKey(workbook) {
+    return workbookKey(workbook || getActiveWorkbook());
+  }
+
+  function normalizeAddress(address) {
+    var value = String(address || "").toUpperCase();
+    var match = /^\$?([A-Z]{1,3})\$?([1-9]\d{0,6})$/.exec(value);
+    if (!match) return "";
+    var column = 0;
+    for (var i = 0; i < match[1].length; i++) column = column * 26 + match[1].charCodeAt(i) - 64;
+    return column <= 16384 && Number(match[2]) <= 1048576 ? match[1] + match[2] : "";
+  }
+
+  function captureContext(workbook, sheet) {
+    workbook = workbook || getActiveWorkbook();
+    sheet = sheet || (workbook === getActiveWorkbook() ? getActiveSheet() : workbook && workbook.ActiveSheet);
+    var key = workbookKey(workbook);
+    if (!workbook || !sheet || !key) throw new Error("无法确认工作簿和工作表，请重新选择单元格");
+    try {
+      var sheetName = String(sheet.Name || "");
+      var sheetCodeName = String(sheet.CodeName || "");
+      var sheetIndex = Number(sheet.Index);
+      var parentKey = workbookKey(sheet.Parent);
+      if (!sheetName || !sheetCodeName || !Number.isInteger(sheetIndex) || sheetIndex < 1 || parentKey !== key) {
+        throw new Error("无法确认工作簿和工作表，请重新选择单元格");
+      }
+      return {
+        workbook: workbook,
+        sheet: sheet,
+        workbookKey: key,
+        sheetName: sheetName,
+        sheetCodeName: sheetCodeName,
+        sheetIndex: sheetIndex
+      };
+    } catch (error) {
+      throw new Error("无法确认工作簿和工作表，请重新选择单元格");
+    }
+  }
+
+  function contextSheet(context) {
+    if (!context || !context.workbook || !context.sheet || !context.workbookKey ||
+        workbookKey(getActiveWorkbook()) !== context.workbookKey || workbookKey(context.workbook) !== context.workbookKey) return null;
+    try {
+      var sheet = context.sheet;
+      if (String(sheet.Name) !== context.sheetName || String(sheet.CodeName || "") !== context.sheetCodeName ||
+          workbookKey(sheet.Parent) !== context.workbookKey) return null;
+      var index = Number(sheet.Index);
+      if (!Number.isInteger(index) || index < 1) return null;
+      var member = context.workbook.Worksheets.Item(index);
+      if (!member || String(member.Name || "") !== context.sheetName ||
+          String(member.CodeName || "") !== context.sheetCodeName || workbookKey(member.Parent) !== context.workbookKey) return null;
+      return sheet; // Keep the original native worksheet reference; never retarget by its tab name.
+    } catch (error) { return null; }
   }
 
   function getPluginStorage() {
@@ -56,75 +114,77 @@
 
   function readCell(cell) {
     if (!cell) return null;
-    var value = null;
-    var formula = null;
-    var address = "";
+    var value = null, formula, formulaR1C1, rawHasFormula;
+    var formulaKnown = false, hasFormula = false, address = "";
     try { value = cell.Value2; } catch (error) { value = null; }
-    try { formula = cell.FormulaR1C1; } catch (error) { /* fallback */ }
-    if (formula == null) {
-      try { formula = cell.Formula; } catch (inner) { formula = null; }
-    }
+    try { formula = cell.Formula; if (formula !== undefined) formulaKnown = true; } catch (error) { /* try R1C1 */ }
+    try { formulaR1C1 = cell.FormulaR1C1; if (formulaR1C1 !== undefined) formulaKnown = true; } catch (error) { /* try HasFormula */ }
+    try { rawHasFormula = cell.HasFormula; if (rawHasFormula !== undefined) formulaKnown = true; } catch (error) { /* fail closed below */ }
+    hasFormula = rawHasFormula === true || rawHasFormula === 1 || rawHasFormula === -1 ||
+      [formula, formulaR1C1].some(function (item) { return typeof item === "string" && /^\s*=/.test(item); });
     try { address = cell.Address(false, false); } catch (error) {
       try { address = String(cell.Address || ""); } catch (inner) { address = ""; }
     }
-    return { address: String(address || "").replace(/\$/g, ""), value: value, formula: formula, formulaKnown: formula != null, cell: cell };
+    return {
+      address: normalizeAddress(address),
+      value: value,
+      formula: formula !== undefined ? formula : formulaR1C1,
+      formulaR1C1: formulaR1C1,
+      formulaKnown: formulaKnown,
+      hasFormula: hasFormula,
+      cell: cell
+    };
   }
 
-  function sheetByName(sheetName) {
-    var workbook = getActiveWorkbook();
-    if (!workbook) return null;
-    try { return sheetName ? workbook.Worksheets.Item(sheetName) : getActiveSheet(); }
-    catch (error) { return null; }
-  }
-
-  function selectAddress(address, sheetName, expectedWorkbookKey) {
-    if (!sheetName || !expectedWorkbookKey || getWorkbookKey() !== expectedWorkbookKey) return false;
-    var sheet = sheetByName(sheetName);
+  function selectAddress(address, context) {
+    var sheet = contextSheet(context);
+    address = normalizeAddress(address);
     if (!sheet || !address) return false;
     try {
-      if (typeof sheet.Activate === "function") sheet.Activate();
       var range = sheet.Range(address);
+      var info = readCell(range);
+      if (!info || info.address !== address || typeof sheet.Activate !== "function") return false;
+      sheet.Activate();
       if (range && typeof range.Select === "function") range.Select();
       else if (range && typeof range.Activate === "function") range.Activate();
       else return false;
       return true;
-    } catch (error) {
-      return false;
-    }
+    } catch (error) { return false; }
   }
 
-  function readAddress(address, sheetName, expectedWorkbookKey) {
-    if (!sheetName || !expectedWorkbookKey || getWorkbookKey() !== expectedWorkbookKey) return null;
-    var sheet = sheetByName(sheetName);
-    try { return sheet ? readCell(sheet.Range(address)) : null; } catch (error) { return null; }
+  function readAddress(address, context) {
+    var sheet = contextSheet(context);
+    address = normalizeAddress(address);
+    if (!sheet || !address) return null;
+    try {
+      var info = readCell(sheet.Range(address));
+      return info && info.address === address ? info : null;
+    } catch (error) { return null; }
   }
 
-  function writeAddress(address, expected, replacement, sheetName, expectedWorkbookKey, options) {
-    if (!sheetName || !expectedWorkbookKey) return { ok: false, reason: "无法确认原工作簿或工作表，请重新校对" };
-    if (getWorkbookKey() !== expectedWorkbookKey) {
-      return { ok: false, reason: "当前已切换到其他工作簿，请返回原工作簿后再处理" };
+  function writeAddress(address, expected, replacement, context, options) {
+    var changed = { ok: false, reason: "单元格内容已变化，请重新校对。" };
+    var sheet = contextSheet(context);
+    address = normalizeAddress(address);
+    if (!sheet || !address) return changed;
+    if (typeof replacement !== "string" ||
+        (!replacement.trim() && !(options && options.allowEmpty)) || /^[\s]*[=+\-@]/.test(replacement)) {
+      return { ok: false, reason: "建议可能被解释为公式，已拒绝写入" };
     }
-    var sheet = sheetByName(sheetName);
-    if (!sheet || !address) return { ok: false, reason: "找不到原工作表" };
     try {
       var range = sheet.Range(address);
       var info = readCell(range);
-      var current = info && info.value;
-      var formula = info && info.formula;
       if (!info || !info.formulaKnown) return { ok: false, reason: "无法确认单元格公式状态，请重新校对" };
-      if (typeof formula === "string" && formula.trim().charAt(0) === "=") {
-        return { ok: false, reason: "公式单元格禁止写入" };
-      }
-      var currentText = current == null && expected === "" ? "" : current;
-      if (typeof currentText !== "string" || currentText !== expected) {
-        return { ok: false, reason: "单元格内容已变化，请重新校对" };
-      }
-      if (typeof replacement !== "string" || (!replacement.trim() && !(options && options.allowEmpty)) || replacement.trim().charAt(0) === "=") {
-        return { ok: false, reason: "建议必须是有效文本，禁止将文本改为公式" };
-      }
+      if (info.hasFormula) return { ok: false, reason: "公式单元格禁止写入" };
+      var currentValue = info.value == null && expected === "" ? "" : info.value;
+      if (info.address !== address || typeof currentValue !== "string" || currentValue !== expected || !contextSheet(context)) return changed;
       range.Value2 = replacement;
-      var written = range.Value2;
-      if ((written == null ? "" : written) !== replacement) return { ok: false, reason: "写回后内容与建议不一致，请检查单元格并重新校对" };
+      var written = readCell(range);
+      var writtenValue = written && written.value == null && replacement === "" ? "" : written && written.value;
+      if (!contextSheet(context) || !written || written.address !== address || written.hasFormula ||
+          !written.formulaKnown || writtenValue !== replacement) {
+        return { ok: false, reason: "写回后内容与建议不一致，请检查单元格并重新校对" };
+      }
       return { ok: true };
     } catch (error) {
       return { ok: false, reason: "写入失败：" + (error && error.message ? error.message : String(error)) };
@@ -137,6 +197,8 @@
     getActiveWorkbook: getActiveWorkbook,
     getActiveSheet: getActiveSheet,
     getWorkbookKey: getWorkbookKey,
+    captureContext: captureContext,
+    normalizeAddress: normalizeAddress,
     getPluginStorage: getPluginStorage,
     getTaskPane: getTaskPane,
     createTaskPane: createTaskPane,
