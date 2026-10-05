@@ -1,0 +1,82 @@
+name: Publish installer release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'package.json'
+      - 'package-lock.json'
+      - 'windows/**'
+      - 'mac/**'
+      - 'scripts/build-windows-server.js'
+      - 'scripts/build-mac-installer.sh'
+      - '.github/workflows/release-windows.yml'
+      - '.github/workflows/release-macos.yml'
+      - '.github/workflows/publish-installers.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: spreadsheet-installer-release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      publish: ${{ steps.check.outputs.publish }}
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if gh release view "v$version" >/dev/null 2>&1; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  windows:
+    needs: prepare
+    if: needs.prepare.outputs.publish == 'true'
+    uses: ./.github/workflows/release-windows.yml
+    with:
+      release_ref: ${{ github.sha }}
+
+  macos:
+    needs: prepare
+    if: needs.prepare.outputs.publish == 'true'
+    uses: ./.github/workflows/release-macos.yml
+    with:
+      release_ref: ${{ github.sha }}
+
+  publish:
+    needs: [prepare, windows, macos]
+    if: needs.prepare.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-installer
+          path: dist/release
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos-installer
+          path: dist/release
+      - name: Create prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          node scripts/release-notes.js
+          gh release create "v$VERSION"             "dist/release/WPS-Spreadsheet-Proofreading-$VERSION-Windows-x64-Setup.exe"             "dist/release/WPS-Spreadsheet-Proofreading-$VERSION-macOS.dmg"             --target "$GITHUB_SHA"             --title "WPS 表格校改 v$VERSION · 测试版"             --notes-file release-notes.md             --prerelease

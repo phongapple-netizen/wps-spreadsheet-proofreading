@@ -1,0 +1,114 @@
+name: Build Windows x64 installer
+
+on:
+  pull_request:
+  workflow_call:
+    inputs:
+      release_ref:
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_ref || github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      - run: npm ci
+      - run: npm test
+      - name: Native Windows tests
+        run: node scripts/build-windows-server.js --test
+      - name: Build x64 server
+        run: npm run build:windows:server
+      - name: Compile installer
+        shell: pwsh
+        run: |
+          $env:WPS_RELEASE_VERSION = (node -p "require('./package.json').version")
+          $env:WPS_DIST_DIR = (Resolve-Path 'dist/windows').Path
+          $iscc = (Get-Command ISCC.exe -ErrorAction SilentlyContinue).Source
+          if (-not $iscc) { $iscc = 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe' }
+          if (-not (Test-Path $iscc)) { throw 'Inno Setup compiler not found.' }
+          & $iscc 'windows/installer.iss'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Smoke test coexistence
+        shell: pwsh
+        timeout-minutes: 8
+        run: |
+          $version = node -p "require('./package.json').version"
+          $server = (Resolve-Path 'dist/windows/WPSSpreadsheetProofreadingServer.exe').Path
+          $self = Start-Process -FilePath $server -ArgumentList '--self-test' -Wait -PassThru
+          if ($self.ExitCode -ne 0) { throw 'Native self-test failed.' }
+
+          $publish = Join-Path $env:APPDATA 'kingsoft\wps\jsaddons\publish.xml'
+          New-Item -ItemType Directory -Force -Path (Split-Path $publish) | Out-Null
+          Set-Content -Path $publish -Encoding UTF8 -Value '<?xml version="1.0"?><jsplugins><jspluginonline name="wps-text-proofreading" type="wps" url="http://127.0.0.1:3891/"/><jspluginonline name="other-addon" url="https://example.test/"/></jsplugins>'
+          $runPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+          New-Item -Path $runPath -Force | Out-Null
+          Set-ItemProperty -Path $runPath -Name WPSProofreading -Value '"C:\Existing\WPSProofreadingServer.exe" --serve'
+          Remove-ItemProperty -Path $runPath -Name WPSSpreadsheetProofreading -ErrorAction SilentlyContinue
+
+          $installer = (Resolve-Path "dist/windows/WPS-Spreadsheet-Proofreading-$version-Windows-x64-Setup.exe").Path
+          Write-Host "Starting installer: $installer"
+          $install = [System.Diagnostics.Process]::Start($installer, '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART')
+          if (-not $install.WaitForExit(120000)) {
+            $install.Kill()
+            $log = Join-Path $env:LOCALAPPDATA 'WPSSpreadsheetProofreading\service-error.log'
+            if (Test-Path $log) { Write-Host "service-error.log:"; Get-Content $log }
+            Get-Process | Where-Object { $_.ProcessName -match 'WPS|Spreadsheet|unins' } | Format-Table -AutoSize
+            throw 'Installer timed out.'
+          }
+          Write-Host "Installer exit code: $($install.ExitCode)"
+          if ($install.ExitCode -ne 0) {
+            $log = Join-Path $env:LOCALAPPDATA 'WPSSpreadsheetProofreading\service-error.log'
+            if (Test-Path $log) { Write-Host "service-error.log:"; Get-Content $log }
+            throw "Installer failed: $($install.ExitCode)"
+          }
+
+          $registered = Get-Content $publish -Raw
+          if ($registered -notmatch 'wps-spreadsheet-proofreading' -or $registered -notmatch 'wps-text-proofreading' -or $registered -notmatch 'other-addon') { throw 'WPS coexistence registration failed.' }
+          $wordStartup = (Get-ItemProperty -Path $runPath -Name WPSProofreading -ErrorAction Stop).WPSProofreading
+          if ($wordStartup -notmatch 'Existing') { throw 'Writer startup entry was changed.' }
+          $sheetStartup = (Get-ItemProperty -Path $runPath -Name WPSSpreadsheetProofreading -ErrorAction Stop).WPSSpreadsheetProofreading
+          if ($sheetStartup -notmatch 'WPSSpreadsheetProofreadingServer.exe') { throw 'Spreadsheet startup entry missing.' }
+
+          $ready=$false
+          for($i=0;$i -lt 20;$i++){
+            try {
+              $p=(Invoke-WebRequest -Uri 'http://127.0.0.1:3892/package.json' -UseBasicParsing -TimeoutSec 2).Content | ConvertFrom-Json
+              if($p.name -eq 'wps-spreadsheet-proofreading' -and $p.version -eq $version){$ready=$true;break}
+            } catch { Start-Sleep -Seconds 1 }
+          }
+          if(-not $ready){throw 'Installed Spreadsheet service did not start.'}
+
+          $uninstaller = Join-Path $env:LOCALAPPDATA 'Programs\WPSSpreadsheetProofreading\unins000.exe'
+          Write-Host "Starting uninstaller: $uninstaller"
+          $uninstall = [System.Diagnostics.Process]::Start($uninstaller, '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART')
+          if (-not $uninstall.WaitForExit(120000)) {
+            $uninstall.Kill()
+            Get-Process | Where-Object { $_.ProcessName -match 'WPS|Spreadsheet|unins' } | Format-Table -AutoSize
+            throw 'Uninstaller timed out.'
+          }
+          Write-Host "Uninstaller exit code: $($uninstall.ExitCode)"
+          if ($uninstall.ExitCode -ne 0) { throw "Uninstaller failed: $($uninstall.ExitCode)" }
+          $remaining=Get-Content $publish -Raw
+          if($remaining -match 'wps-spreadsheet-proofreading' -or $remaining -notmatch 'wps-text-proofreading' -or $remaining -notmatch 'other-addon'){throw 'Spreadsheet uninstall damaged other add-ins.'}
+          if(Get-ItemProperty -Path $runPath -Name WPSSpreadsheetProofreading -ErrorAction SilentlyContinue){throw 'Spreadsheet startup entry remained.'}
+          $wordStartup2=(Get-ItemProperty -Path $runPath -Name WPSProofreading -ErrorAction Stop).WPSProofreading
+          if($wordStartup2 -ne $wordStartup){throw 'Writer startup entry changed during uninstall.'}
+          Remove-ItemProperty -Path $runPath -Name WPSProofreading -ErrorAction SilentlyContinue
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: dist/windows/WPS-Spreadsheet-Proofreading-*-Windows-x64-Setup.exe
+          if-no-files-found: error

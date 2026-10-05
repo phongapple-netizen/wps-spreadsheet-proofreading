@@ -1,0 +1,1103 @@
+import AppKit
+import Darwin
+import Foundation
+
+private let addonName = "wps-spreadsheet-proofreading"
+private let serviceLabel = "net.wps-spreadsheet-proofreading.web"
+private let servicePort: UInt16 = 3892
+
+private enum InstallerError: LocalizedError {
+    case message(String)
+    var errorDescription: String? {
+        if case .message(let value) = self { return value }
+        return nil
+    }
+}
+
+private enum InstallTransaction {
+    static func run(preflight: () throws -> Void, register: () throws -> Void,
+                    start: () throws -> Void, rollback: () throws -> Void) throws {
+        try preflight()
+        try register()
+        do { try start() }
+        catch {
+            let failure = error
+            do { try rollback() }
+            catch { throw InstallerError.message("安装失败（\(failure.localizedDescription)），回滚也失败（\(error.localizedDescription)）。") }
+            throw failure
+        }
+    }
+}
+
+private enum Paths {
+    static var home: URL { FileManager.default.homeDirectoryForCurrentUser }
+    static var executable: String { Bundle.main.executableURL!.path }
+    static var addon: URL { Bundle.main.resourceURL!.appendingPathComponent("addon", isDirectory: true) }
+    static var agent: URL {
+        home.appendingPathComponent("Library/LaunchAgents/\(serviceLabel).plist")
+    }
+    static var logs: URL {
+        home.appendingPathComponent("Library/Logs/wps-spreadsheet-proofreading", isDirectory: true)
+    }
+    static var publishFiles: [URL] {
+        [
+            "Library/Containers/com.kingsoft.wpsoffice.mac/Data/.kingsoft/wps/jsaddons/publish.xml",
+            "Library/Containers/com.kingsoft.wpsoffice.mac.global/Data/.kingsoft/wps/jsaddons/publish.xml",
+            "Library/Application Support/Kingsoft/WPS/jsaddons/publish.xml"
+        ].map { home.appendingPathComponent($0) }
+    }
+}
+
+private final class XMLRootVerifier: NSObject, XMLParserDelegate {
+    var root: String?
+    func parser(_ parser: XMLParser, didStartElement elementName: String,
+                namespaceURI: String?, qualifiedName qName: String?, attributes attributeDict: [String: String]) {
+        if root == nil { root = elementName.lowercased() }
+    }
+}
+
+private enum WPSRegistration {
+    static let entry = "  <jspluginonline name=\"\(addonName)\" type=\"et\" url=\"http://127.0.0.1:\(servicePort)/\" debug=\"\" enable=\"enable_dev\" install=\"null\"/>"
+    static let pattern = try! NSRegularExpression(
+        pattern: "\\s*<jspluginonline\\b[^>]*\\bname=[\"']wps-spreadsheet-proofreading[\"'][^>]*\\s*/>",
+        options: [.caseInsensitive]
+    )
+
+    static func candidateFiles() -> [URL] {
+        let fm = FileManager.default
+        let existing = Paths.publishFiles.filter { url in
+            let root: URL
+            if url.path.contains("/Library/Containers/") {
+                root = url.deletingLastPathComponent().deletingLastPathComponent()
+                    .deletingLastPathComponent().deletingLastPathComponent()
+            } else {
+                root = url.deletingLastPathComponent().deletingLastPathComponent()
+            }
+            return fm.fileExists(atPath: url.path) || fm.fileExists(atPath: url.deletingLastPathComponent().path)
+                || fm.fileExists(atPath: root.path)
+        }
+        return existing.isEmpty ? [Paths.publishFiles[0]] : existing
+    }
+
+    static func update(_ xml: String, install: Bool) throws -> String {
+        if !xml.isEmpty {
+            guard xml.range(of: "<jsplugins\\b[^>]*>", options: [.regularExpression, .caseInsensitive]) != nil,
+                  xml.range(of: "</jsplugins>", options: [.regularExpression, .caseInsensitive]) != nil,
+                  let data = xml.data(using: .utf8) else {
+                throw InstallerError.message("WPS publish.xml 格式异常，已停止修改以保护其他加载项。")
+            }
+            let parser = XMLParser(data: data)
+            let verifier = XMLRootVerifier()
+            parser.delegate = verifier
+            guard parser.parse(), verifier.root == "jsplugins" else {
+                throw InstallerError.message("WPS publish.xml 格式异常，已停止修改以保护其他加载项。")
+            }
+        }
+        let range = NSRange(xml.startIndex..<xml.endIndex, in: xml)
+        let cleared = pattern.stringByReplacingMatches(in: xml, range: range, withTemplate: "")
+        guard install else { return cleared }
+        let base = cleared.isEmpty
+            ? "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<jsplugins>\n</jsplugins>\n"
+            : cleared
+        guard let closing = base.range(of: "</jsplugins>", options: [.caseInsensitive, .backwards]) else { throw InstallerError.message("WPS publish.xml 缺少结束标签，已停止修改。") }
+        let prefix = String(base[..<closing.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+        return prefix + "\n" + entry + "\n" + String(base[closing.lowerBound...])
+    }
+
+    static func write(install: Bool, files overrideFiles: [URL]? = nil) throws -> (files: [URL], previous: [URL: Data?]) {
+        let fm = FileManager.default
+        let files = overrideFiles ?? (install ? candidateFiles() : Paths.publishFiles.filter { fm.fileExists(atPath: $0.path) })
+        var previous: [URL: Data?] = [:]
+        do {
+            for file in files {
+                let fileExists = fm.fileExists(atPath: file.path)
+                let data = try? Data(contentsOf: file)
+                if fileExists && data == nil { throw InstallerError.message("无法读取 WPS publish.xml，已停止修改。") }
+                previous[file] = .some(data)
+                let old = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+                if let data, !data.isEmpty, old.isEmpty { throw InstallerError.message("WPS publish.xml 不是有效 UTF-8，已停止修改。") }
+                let next = try update(old, install: install)
+                if old == next { continue }
+                try fm.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+                if !old.isEmpty {
+                    // Replace the single rolling backup atomically. Backup failures abort the update.
+                    try data!.write(to: URL(fileURLWithPath: file.path + ".wps-spreadsheet-proofreading.bak"), options: .atomic)
+                }
+                try next.write(to: file, atomically: true, encoding: .utf8)
+            }
+        } catch {
+            let failure = error
+            do { try rollback(previous) }
+            catch { throw InstallerError.message("写入 WPS 注册项失败（\(failure.localizedDescription)），恢复原配置也失败（\(error.localizedDescription)）。") }
+            throw failure
+        }
+        return (files, previous)
+    }
+
+    static func rollback(_ previous: [URL: Data?]) throws {
+        var failures: [String] = []
+        for (url, data) in previous {
+            do {
+                if let data { try data.write(to: url, options: .atomic) }
+                else if FileManager.default.fileExists(atPath: url.path) { try FileManager.default.removeItem(at: url) }
+            } catch { failures.append("\(url.path): \(error.localizedDescription)") }
+        }
+        if !failures.isEmpty { throw InstallerError.message(failures.joined(separator: "；")) }
+    }
+
+    static func restorePluginEntries() throws {
+        _ = try write(install: false)
+    }
+}
+
+private enum LoginService {
+    static func launchctl(_ arguments: [String], allowFailure: Bool = false) throws {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        task.arguments = arguments
+        let errors = Pipe()
+        task.standardError = errors
+        task.standardOutput = Pipe()
+        try task.run()
+        task.waitUntilExit()
+        if task.terminationStatus != 0 && !allowFailure {
+            let detail = String(data: errors.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            throw InstallerError.message("启动本机服务失败：\(detail.trimmingCharacters(in: .whitespacesAndNewlines))")
+        }
+    }
+
+    static func install() throws {
+        let fm = FileManager.default
+        try fm.createDirectory(at: Paths.agent.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try fm.createDirectory(at: Paths.logs, withIntermediateDirectories: true)
+        let domain = "gui/\(getuid())"
+        let agentExists = fm.fileExists(atPath: Paths.agent.path)
+        let oldAgent = try? Data(contentsOf: Paths.agent)
+        if agentExists && oldAgent == nil { throw InstallerError.message("无法读取现有 LaunchAgent，已停止安装。") }
+        do {
+            if oldAgent != nil { try launchctl(["bootout", domain, Paths.agent.path], allowFailure: true) }
+            let portDeadline = Date().addingTimeInterval(3)
+            while !StaticServer.portIsAvailable(servicePort) && Date() < portDeadline {
+                Thread.sleep(forTimeInterval: 0.1)
+            }
+            guard StaticServer.portIsAvailable(servicePort) else {
+                throw InstallerError.message("端口 3892 已被其他程序占用，无法安装本机服务。")
+            }
+            let plist: [String: Any] = [
+                "Label": serviceLabel,
+                "ProgramArguments": [Paths.executable, "--serve"],
+                "RunAtLoad": true,
+                "KeepAlive": true,
+                "ThrottleInterval": 30,
+                "StandardOutPath": Paths.logs.appendingPathComponent("web.log").path,
+                "StandardErrorPath": Paths.logs.appendingPathComponent("web.error.log").path
+            ]
+            let data = try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
+            try data.write(to: Paths.agent, options: .atomic)
+            try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: Paths.agent.path)
+            try launchctl(["bootstrap", domain, Paths.agent.path])
+            guard StaticServer.waitForHealth(timeout: 8) else {
+                throw InstallerError.message("本机服务启动后未能通过健康检查。")
+            }
+        } catch {
+            let failure = error
+            var rollbackErrors: [String] = []
+            do { try launchctl(["bootout", domain, Paths.agent.path], allowFailure: true) }
+            catch { rollbackErrors.append(error.localizedDescription) }
+            do { if fm.fileExists(atPath: Paths.agent.path) { try fm.removeItem(at: Paths.agent) } }
+            catch { rollbackErrors.append(error.localizedDescription) }
+            if let oldAgent {
+                do { try oldAgent.write(to: Paths.agent, options: .atomic) }
+                catch { rollbackErrors.append(error.localizedDescription) }
+                do { try launchctl(["bootstrap", domain, Paths.agent.path]) }
+                catch { rollbackErrors.append(error.localizedDescription) }
+            }
+            if !rollbackErrors.isEmpty {
+                throw InstallerError.message("服务安装失败（\(failure.localizedDescription)）；恢复原 LaunchAgent 也失败：\(rollbackErrors.joined(separator: "；"))")
+            }
+            throw failure
+        }
+    }
+
+    static func remove() throws {
+        if FileManager.default.fileExists(atPath: Paths.agent.path) {
+            try launchctl(["bootout", "gui/\(getuid())", Paths.agent.path], allowFailure: true)
+            try FileManager.default.removeItem(at: Paths.agent)
+        }
+    }
+}
+
+private enum NativeOpenCode {
+    enum Health: Equatable { case ready, absent, conflict }
+    struct HealthResult { let state: Health; let version: String }
+    fileprivate final class ManagedRun {
+        let process: Process
+        let pipe: Pipe
+        let terminated: DispatchSemaphore
+        let readerFinished: DispatchSemaphore
+        let closeLog: () -> Void
+
+        init(process: Process, pipe: Pipe, terminated: DispatchSemaphore,
+             readerFinished: DispatchSemaphore, closeLog: @escaping () -> Void) {
+            self.process = process
+            self.pipe = pipe
+            self.terminated = terminated
+            self.readerFinished = readerFinished
+            self.closeLog = closeLog
+        }
+    }
+    private static let lock = NSLock()
+    fileprivate static var child: ManagedRun?
+    private static let logLimit = 1024 * 1024
+
+    fileprivate static func shouldClearChild(_ run: ManagedRun, current: ManagedRun?) -> Bool {
+        current === run
+    }
+
+    fileprivate static func stopManagedChild(_ run: ManagedRun) {
+        guard shouldClearChild(run, current: child) else { return }
+        let process = run.process
+        if process.isRunning {
+            process.terminate()
+            if run.terminated.wait(timeout: .now() + 0.5) == .timedOut && process.isRunning {
+                _ = Darwin.kill(process.processIdentifier, SIGKILL)
+                _ = run.terminated.wait(timeout: .now() + 1)
+            }
+        }
+
+        // A descendant may inherit stdout and keep the reader alive after the managed
+        // process exits. Close our pipe ends and log handle so a retry can start cleanly.
+        try? run.pipe.fileHandleForReading.close()
+        try? run.pipe.fileHandleForWriting.close()
+        run.closeLog()
+        _ = run.readerFinished.wait(timeout: .now() + 0.25)
+        if shouldClearChild(run, current: child) { child = nil }
+    }
+
+    fileprivate static func waitUntilReady(run: ManagedRun, timeout: TimeInterval, pollInterval: TimeInterval,
+                                           healthProbe: () -> HealthResult) -> HealthResult? {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            let current = healthProbe()
+            if current.state == .ready { return current }
+            Thread.sleep(forTimeInterval: pollInterval)
+        }
+        stopManagedChild(run)
+        return nil
+    }
+
+    fileprivate static func searchDirectories(path: String, home: String,
+                                              homebrewArm: String = "/opt/homebrew/bin",
+                                              usrLocal: String = "/usr/local/bin") -> [String] {
+        var dirs = path.split(separator: ":").map(String.init)
+        dirs += ["\(home)/.opencode/bin", "\(home)/.local/bin", "\(home)/bin", "\(home)/.npm-global/bin", homebrewArm, usrLocal]
+        var seen = Set<String>()
+        return dirs.filter { seen.insert($0).inserted }
+    }
+
+    fileprivate static func findExecutable(directories: [String], isExecutable: (String) -> Bool) -> URL? {
+        directories.map { URL(fileURLWithPath: $0).appendingPathComponent("opencode") }
+            .first { isExecutable($0.path) }
+    }
+
+    private static func executable() -> URL? {
+        let home = Paths.home.path
+        let path = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        return findExecutable(directories: searchDirectories(path: path, home: home)) {
+            FileManager.default.isExecutableFile(atPath: $0)
+        }
+    }
+
+    private static func version(_ executable: URL) -> String {
+        let process = Process()
+        process.executableURL = executable
+        process.arguments = ["--version"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        let outputLock = NSLock()
+        var output = Data()
+        let readerFinished = DispatchSemaphore(value: 0)
+        do {
+            DispatchQueue.global(qos: .utility).async {
+                while true {
+                    guard let data = try? pipe.fileHandleForReading.read(upToCount: 2048), !data.isEmpty else { break }
+                    outputLock.lock()
+                    if output.count < 256 { output.append(data.prefix(256 - output.count)) }
+                    outputLock.unlock()
+                }
+                readerFinished.signal()
+            }
+            let completed = DispatchSemaphore(value: 0)
+            process.terminationHandler = { _ in completed.signal() }
+            try process.run()
+            if completed.wait(timeout: .now() + 3) == .timedOut {
+                if process.isRunning { process.terminate() }
+                if completed.wait(timeout: .now() + 0.25) == .timedOut && process.isRunning {
+                    _ = Darwin.kill(process.processIdentifier, SIGKILL)
+                    _ = completed.wait(timeout: .now() + 0.25)
+                }
+                pipe.fileHandleForReading.closeFile()
+                return ""
+            }
+            _ = readerFinished.wait(timeout: .now() + 0.2)
+            guard process.terminationStatus == 0 else { return "" }
+            outputLock.lock(); defer { outputLock.unlock() }
+            return String(data: output, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        } catch { pipe.fileHandleForReading.closeFile(); return "" }
+    }
+
+    static func health() -> HealthResult {
+        guard let url = URL(string: "http://127.0.0.1:4096/global/health") else { return HealthResult(state: .absent, version: "") }
+        var request = URLRequest(url: url, timeoutInterval: 1.5)
+        request.httpMethod = "GET"
+        let semaphore = DispatchSemaphore(value: 0)
+        var result = HealthResult(state: .absent, version: "")
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            defer { semaphore.signal() }
+            result = classifyHealth(status: (response as? HTTPURLResponse)?.statusCode, body: data,
+                                    errorCode: (error as NSError?)?.code)
+        }.resume()
+        if semaphore.wait(timeout: .now() + 2) == .timedOut { return HealthResult(state: .conflict, version: "") }
+        return result
+    }
+
+    fileprivate static func classifyHealth(status: Int?, body: Data?, errorCode: Int?) -> HealthResult {
+        if let status {
+            guard (200..<300).contains(status), let body,
+                  let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+                  json["healthy"] as? Bool == true,
+                  let version = json["version"] as? String,
+                  !version.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return HealthResult(state: .conflict, version: "")
+            }
+            return HealthResult(state: .ready, version: version)
+        }
+        if errorCode == NSURLErrorTimedOut || errorCode == NSURLErrorNetworkConnectionLost {
+            return HealthResult(state: .conflict, version: "")
+        }
+        return HealthResult(state: .absent, version: "")
+    }
+
+    private static func response(state: String, found: Bool, version: String = "", managed: Bool = false) -> Data {
+        let body: [String: Any] = ["state": state, "found": found, "version": version, "managed": managed]
+        return (try? JSONSerialization.data(withJSONObject: body)) ?? Data("{}".utf8)
+    }
+
+    static func status() -> Data {
+        lock.lock()
+        let managed = child?.process.isRunning == true
+        lock.unlock()
+        let executable = executable()
+        let current = health()
+        let version = current.state == .ready ? current.version : (executable.map(version) ?? "")
+        switch current.state {
+        case .ready: return response(state: "ready", found: executable != nil, version: version, managed: managed)
+        case .conflict: return response(state: "port_conflict", found: executable != nil, version: version)
+        case .absent: return response(state: executable == nil ? "missing" : "stopped", found: executable != nil, version: version)
+        }
+    }
+
+    static func start() -> Data {
+        start(discover: executable, healthProbe: health, versionProbe: version,
+              timeout: 15, pollInterval: 0.25, logDirectory: Paths.logs)
+    }
+
+    fileprivate static func start(discover: () -> URL?, healthProbe: () -> HealthResult,
+                                  versionProbe: (URL) -> String, timeout: TimeInterval,
+                                  pollInterval: TimeInterval, logDirectory: URL) -> Data {
+        lock.lock(); defer { lock.unlock() }
+        let current = healthProbe()
+        if case .ready = current.state {
+            let executable = discover()
+            return response(state: "ready", found: executable != nil, version: current.version, managed: child?.process.isRunning == true)
+        }
+        if case .conflict = current.state, child?.process.isRunning != true {
+            return response(state: "port_conflict", found: discover() != nil)
+        }
+        guard let executable = discover() else { return response(state: "missing", found: false) }
+        if child?.process.isRunning != true {
+            if let previous = child { stopManagedChild(previous) }
+            let process = Process()
+            process.executableURL = executable
+            process.arguments = ["serve", "--hostname", "127.0.0.1", "--port", "4096", "--cors", "http://127.0.0.1:3891", "--cors", "http://127.0.0.1:3892"]
+            let pipe = Pipe(); process.standardOutput = pipe; process.standardError = pipe
+            let terminated = DispatchSemaphore(value: 0)
+            let readerFinished = DispatchSemaphore(value: 0)
+            var closeCreatedLog: (() -> Void)?
+            process.terminationHandler = { _ in terminated.signal() }
+            do {
+                try FileManager.default.createDirectory(at: logDirectory, withIntermediateDirectories: true)
+                let log = logDirectory.appendingPathComponent("opencode.log")
+                if let size = (try? FileManager.default.attributesOfItem(atPath: log.path)[.size] as? NSNumber)?.intValue, size >= logLimit {
+                    try? FileManager.default.removeItem(at: log)
+                }
+                FileManager.default.createFile(atPath: log.path, contents: nil, attributes: [.posixPermissions: 0o600])
+                let output = try FileHandle(forWritingTo: log)
+                let outputLock = NSLock()
+                var outputClosed = false
+                let closeLog = {
+                    outputLock.lock(); defer { outputLock.unlock() }
+                    guard !outputClosed else { return }
+                    outputClosed = true
+                    try? output.close()
+                }
+                closeCreatedLog = closeLog
+                try process.run()
+                try? pipe.fileHandleForWriting.close()
+                let run = ManagedRun(process: process, pipe: pipe, terminated: terminated,
+                                     readerFinished: readerFinished, closeLog: closeLog)
+                child = run
+                DispatchQueue.global(qos: .utility).async {
+                    defer { try? pipe.fileHandleForReading.close(); closeLog(); readerFinished.signal() }
+                    do {
+                        while let data = try pipe.fileHandleForReading.read(upToCount: 4096), !data.isEmpty {
+                            outputLock.lock()
+                            if !outputClosed {
+                                let current = (try? FileManager.default.attributesOfItem(atPath: log.path)[.size] as? NSNumber)?.intValue ?? 0
+                                if current + data.count > logLimit { try? output.truncate(atOffset: 0); try? output.seek(toOffset: 0) }
+                                try? output.write(contentsOf: data)
+                            }
+                            outputLock.unlock()
+                        }
+                    } catch { }
+                }
+            } catch {
+                closeCreatedLog?()
+                try? pipe.fileHandleForReading.close()
+                try? pipe.fileHandleForWriting.close()
+                return response(state: "error", found: true, version: versionProbe(executable))
+            }
+        }
+        guard let run = child else { return response(state: "error", found: true) }
+        if let ready = waitUntilReady(run: run, timeout: timeout, pollInterval: pollInterval, healthProbe: healthProbe) {
+            return response(state: "ready", found: true, version: ready.version, managed: child?.process.isRunning == true)
+        }
+        return response(state: "error", found: true, version: versionProbe(executable), managed: child?.process.isRunning == true)
+    }
+}
+
+
+private enum OpenCodeProxy {
+    private static let lock = NSLock()
+    private static var sessions: [String: String] = [:]
+    private static let ownerRegex = try! NSRegularExpression(pattern: "^[a-f0-9]{32}$")
+    private static let idRegex = try! NSRegularExpression(pattern: "^[A-Za-z0-9_-]{1,200}$")
+    private static let responseLimit = 16 * 1024 * 1024
+
+    struct Result { let status: Int; let data: Data }
+
+    private final class NoRedirect: NSObject, URLSessionTaskDelegate {
+        func urlSession(_ session: URLSession, task: URLSessionTask,
+                        willPerformHTTPRedirection response: HTTPURLResponse,
+                        newRequest request: URLRequest,
+                        completionHandler: @escaping (URLRequest?) -> Void) {
+            completionHandler(nil)
+        }
+    }
+    private static let urlSession = URLSession(configuration: .ephemeral, delegate: NoRedirect(), delegateQueue: nil)
+
+    private static func matches(_ regex: NSRegularExpression, _ value: String) -> Bool {
+        regex.firstMatch(in: value, range: NSRange(value.startIndex..<value.endIndex, in: value)) != nil
+    }
+    private static func gone(_ status: Int) -> Bool { (200..<300).contains(status) || status == 404 || status == 410 }
+    private static func value(_ headers: [String: [String]], _ name: String) -> String {
+        headers.first { $0.key.caseInsensitiveCompare(name) == .orderedSame }?.value.first ?? ""
+    }
+    private static func json(_ value: Any) -> Data {
+        (try? JSONSerialization.data(withJSONObject: value)) ?? Data("{}".utf8)
+    }
+    private static func call(path: String, method: String, body: Data?, authorization: String,
+                             timeout: TimeInterval) -> Result? {
+        guard let url = URL(string: "http://127.0.0.1:4096" + path) else { return nil }
+        var request = URLRequest(url: url, timeoutInterval: timeout)
+        request.httpMethod = method
+        request.httpBody = body
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if !authorization.isEmpty { request.setValue(authorization, forHTTPHeaderField: "Authorization") }
+        let semaphore = DispatchSemaphore(value: 0)
+        var result: Result?
+        urlSession.dataTask(with: request) { data, response, _ in
+            defer { semaphore.signal() }
+            guard let http = response as? HTTPURLResponse else { return }
+            let payload = data ?? Data()
+            guard payload.count <= responseLimit else { return }
+            if !payload.isEmpty, (try? JSONSerialization.jsonObject(with: payload)) == nil { return }
+            result = Result(status: http.statusCode, data: payload)
+        }.resume()
+        _ = semaphore.wait(timeout: .now() + timeout + 1)
+        return result
+    }
+    private static func askPermission(_ object: [String: Any]) -> Bool {
+        guard let rules = object["permission"] as? [[String: Any]], rules.count == 1 else { return false }
+        let rule = rules[0]
+        return rule["permission"] as? String == "*" && rule["pattern"] as? String == "*" && rule["action"] as? String == "ask"
+    }
+    private static func route(_ path: String) -> (id: String, suffix: String)? {
+        guard path.hasPrefix("/session/") else { return nil }
+        let parts = path.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+        guard parts.count == 2 || parts.count == 3, parts[0] == "session", matches(idRegex, parts[1]) else { return nil }
+        let suffix = parts.count == 3 ? "/" + parts[2] : ""
+        guard suffix.isEmpty || suffix == "/message" || suffix == "/abort" else { return nil }
+        return (parts[1], suffix)
+    }
+
+    static func handle(method: String, target: String, headers: [String: [String]], body: Data) -> Result {
+        if target.contains("?") { return Result(status: 400, data: json(["error":"Query parameters are not allowed"])) }
+        let owner = value(headers, "x-wps-client")
+        let authorization = value(headers, "authorization")
+        let origin = value(headers, "origin")
+        guard matches(ownerRegex, owner), authorization.utf8.count <= 4096,
+              origin.isEmpty || origin == "http://127.0.0.1:3892" else {
+            return Result(status: 403, data: json(["error":"Invalid client identity"]))
+        }
+        let identity = owner + ":" + authorization
+        let path = String(target.dropFirst("/api/opencode".count))
+        let route = route(path)
+        let create = path == "/session" && method == "POST"
+        let permission = path == "/permission" && method == "GET"
+        let read = ["/global/health","/api/health","/config/providers"].contains(path) && method == "GET"
+        let ownAction = route != nil && (((route!.suffix == "/message" || route!.suffix == "/abort") && method == "POST")
+            || (route!.suffix.isEmpty && method == "DELETE"))
+        guard create || permission || read || ownAction else {
+            return Result(status: 404, data: json(["error":"Unsupported OpenCode operation"]))
+        }
+        if ownAction, let route {
+            lock.lock(); let current = sessions[route.id]; lock.unlock()
+            guard current == identity else { return Result(status: 403, data: json(["error":"Session does not belong to this panel"])) }
+        }
+
+        var outgoing: Data? = nil
+        if create {
+            outgoing = json(["title":"WPS 表格校改","permission":[["permission":"*","pattern":"*","action":"ask"]]])
+        } else if ownAction && method == "POST", let route {
+            if route.suffix == "/message" {
+                guard let input = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+                      let model = input["model"] as? [String: Any],
+                      let providerID = model["providerID"] as? String, !providerID.isEmpty,
+                      let modelID = model["modelID"] as? String, !modelID.isEmpty,
+                      let parts = input["parts"] as? [[String: Any]], !parts.isEmpty,
+                      parts.allSatisfy({ $0["type"] as? String == "text" && $0["text"] is String }) else {
+                    return Result(status: 400, data: json(["error":"Only text proofreading messages are allowed"]))
+                }
+                outgoing = json([
+                    "agent":"build",
+                    "model":["providerID":providerID,"modelID":modelID],
+                    "system":"你只负责校对用户提供的表格文本。不要调用任何工具，不要读取或修改本机文件。只返回要求的 JSON。",
+                    "parts":parts.map { ["type":"text","text":$0["text"] as! String] }
+                ])
+            } else { outgoing = Data("{}".utf8) }
+        }
+        let timeout: TimeInterval = route?.suffix == "/message" ? 125 : 10
+        guard let upstream = call(path: path, method: method, body: outgoing,
+                                  authorization: authorization, timeout: timeout) else {
+            if let route, route.suffix == "/message" {
+                _ = call(path: "/session/\(route.id)/abort", method: "POST", body: Data("{}".utf8),
+                         authorization: authorization, timeout: 2)
+            }
+            return Result(status: 502, data: json(["error":"OpenCode proxy request failed"]))
+        }
+        var response = upstream.data
+        if create && (200..<300).contains(upstream.status) {
+            guard let object = try? JSONSerialization.jsonObject(with: upstream.data) as? [String: Any],
+                  let id = object["id"] as? String, matches(idRegex, id) else {
+                return Result(status: 502, data: json(["error":"Invalid session identity"]))
+            }
+            lock.lock(); let duplicate = sessions[id] != nil; if !duplicate { sessions[id] = identity }; lock.unlock()
+            if duplicate || !askPermission(object) {
+                _ = call(path: "/session/\(id)/abort", method: "POST", body: Data("{}".utf8),
+                         authorization: authorization, timeout: 2)
+                if let cleanup = call(path: "/session/\(id)", method: "DELETE", body: nil,
+                                      authorization: authorization, timeout: 2), gone(cleanup.status) {
+                    lock.lock(); sessions.removeValue(forKey: id); lock.unlock()
+                }
+                return Result(status: 502, data: json(["error":"OpenCode did not enforce tool approval"]))
+            }
+        }
+        if permission && (200..<300).contains(upstream.status) {
+            guard let values = try? JSONSerialization.jsonObject(with: upstream.data) as? [[String: Any]] else {
+                return Result(status: 502, data: json(["error":"Invalid permission response"]))
+            }
+            lock.lock()
+            let filtered = values.filter { item in
+                guard let id = item["sessionID"] as? String else { return false }
+                return sessions[id] == identity
+            }
+            lock.unlock()
+            response = json(filtered)
+        }
+        if ownAction && method == "DELETE", let route, gone(upstream.status) {
+            lock.lock(); sessions.removeValue(forKey: route.id); lock.unlock()
+        }
+        return Result(status: upstream.status, data: response)
+    }
+}
+
+
+private enum StaticServer {
+    static let types = ["html": "text/html", "css": "text/css", "js": "application/javascript",
+                        "json": "application/json", "xml": "application/xml"]
+
+    static func portIsAvailable(_ port: UInt16) -> Bool {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { return false }
+        defer { close(fd) }
+        var reuse: Int32 = 1
+        _ = setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, socklen_t(MemoryLayout<Int32>.size))
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = port.bigEndian
+        address.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
+        return withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) == 0
+            }
+        }
+    }
+
+    static func waitForPort(_ port: UInt16, timeout: TimeInterval) -> Bool {
+        let until = Date().addingTimeInterval(timeout)
+        repeat {
+            if !portIsAvailable(port) { return true }
+            Thread.sleep(forTimeInterval: 0.1)
+        } while Date() < until
+        return false
+    }
+
+    static func waitForHealth(timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            guard let url = URL(string: "http://127.0.0.1:\(servicePort)/api/health") else { return false }
+            let semaphore = DispatchSemaphore(value: 0)
+            var healthy = false
+            URLSession.shared.dataTask(with: url) { data, response, _ in
+                if let http = response as? HTTPURLResponse, http.statusCode == 200,
+                   let data, String(data: data, encoding: .utf8) == "wps-spreadsheet-proofreading-ready" { healthy = true }
+                semaphore.signal()
+            }.resume()
+            _ = semaphore.wait(timeout: .now() + 0.5)
+            if healthy { return true }
+            Thread.sleep(forTimeInterval: 0.15)
+        }
+        return false
+    }
+
+    static func isOwnServerHealthy() -> Bool {
+        guard let url = URL(string: "http://127.0.0.1:\(servicePort)/api/health") else { return false }
+        let semaphore = DispatchSemaphore(value: 0)
+        var healthy = false
+        URLSession.shared.dataTask(with: url) { data, response, _ in
+            if let http = response as? HTTPURLResponse, http.statusCode == 200,
+               let data, String(data: data, encoding: .utf8) == "wps-spreadsheet-proofreading-ready" { healthy = true }
+            semaphore.signal()
+        }.resume()
+        _ = semaphore.wait(timeout: .now() + 1)
+        return healthy
+    }
+
+    fileprivate static func validHostHeaders(_ values: [String], port: UInt16) -> Bool {
+        values.count == 1 && values[0] == "127.0.0.1:\(port)"
+    }
+
+    fileprivate static func validStartHeaders(origins: [String], contentLengths: [String], transferEncodings: [String], body: String) -> Bool {
+        origins.count == 1 && origins[0] == "http://127.0.0.1:3892" && transferEncodings.isEmpty
+            && contentLengths.count <= 1 && (body.isEmpty || body == "{}")
+    }
+
+    static func allowsMethod(_ method: String, path: String) -> Bool {
+        if path == "/api/opencode/status" { return method == "GET" }
+        if path == "/api/opencode/start" { return method == "POST" }
+        if path.hasPrefix("/api/opencode/") { return true }
+        if path == "/api/health" { return method == "GET" }
+        return method == "GET" || method == "HEAD"
+    }
+
+    private static func headerValues(_ lines: [String], named name: String) -> [String] {
+        lines.dropFirst().compactMap { line in
+            guard let separator = line.firstIndex(of: ":"),
+                  line[..<separator].trimmingCharacters(in: .whitespaces).caseInsensitiveCompare(name) == .orderedSame else { return nil }
+            return line[line.index(after: separator)...].trimmingCharacters(in: .whitespaces)
+        }
+    }
+
+    static func run(port: UInt16) throws -> Never {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { throw InstallerError.message("无法创建本机服务套接字。") }
+        var reuse: Int32 = 1
+        _ = setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, socklen_t(MemoryLayout<Int32>.size))
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = port.bigEndian
+        address.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
+        let bound = withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard bound == 0, listen(fd, 32) == 0 else {
+            close(fd)
+            throw InstallerError.message("端口 \(port) 已被占用，或本机服务无法启动。")
+        }
+        while true {
+            let client = accept(fd, nil, nil)
+            if client < 0 { continue }
+            var noSigpipe: Int32 = 1
+            _ = setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &noSigpipe, socklen_t(MemoryLayout<Int32>.size))
+            DispatchQueue.global(qos: .utility).async {
+                handle(client, port: port)
+                close(client)
+            }
+        }
+    }
+
+    private static func sendAll(_ fd: Int32, _ data: Data) {
+        data.withUnsafeBytes { bytes in
+            guard let base = bytes.baseAddress else { return }
+            var offset = 0
+            while offset < data.count {
+                let count = Darwin.send(fd, base.advanced(by: offset), data.count - offset, 0)
+                if count <= 0 { break }
+                offset += count
+            }
+        }
+    }
+
+    private static func respond(_ fd: Int32, status: String, body: Data, type: String = "text/plain; charset=utf-8", head: Bool = false) {
+        let header = "HTTP/1.1 \(status)\r\nContent-Type: \(type)\r\nContent-Length: \(body.count)\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"
+        sendAll(fd, Data(header.utf8))
+        if !head { sendAll(fd, body) }
+    }
+
+    private static func handle(_ fd: Int32, port: UInt16) {
+        var timeout = timeval(tv_sec: 5, tv_usec: 0)
+        _ = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+        var request = Data()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        let separatorData = Data("\r\n\r\n".utf8)
+        while request.count < 16384 && request.range(of: separatorData) == nil {
+            let count = recv(fd, &buffer, buffer.count, 0)
+            if count <= 0 { return }
+            request.append(contentsOf: buffer[..<count])
+        }
+        guard let separator = request.range(of: separatorData),
+              let headerText = String(data: request[..<separator.lowerBound], encoding: .utf8) else {
+            respond(fd, status: "400 Bad Request", body: Data()); return
+        }
+        let lines = headerText.components(separatedBy: "\r\n")
+        let first = lines.first?.split(separator: " ") ?? []
+        let head = first.first == "HEAD"
+        guard first.count == 3 else { respond(fd, status: "405 Method Not Allowed", body: Data()); return }
+        let method = String(first[0]), rawTarget = String(first[1])
+        let rawPath = rawTarget.components(separatedBy: "?")[0]
+        guard validHostHeaders(headerValues(lines, named: "host"), port: port), allowsMethod(method, path: rawPath) else {
+            respond(fd, status: "403 Forbidden", body: Data()); return
+        }
+        let transfer = headerValues(lines, named: "transfer-encoding")
+        let lengths = headerValues(lines, named: "content-length")
+        guard lengths.count <= 1, transfer.isEmpty,
+              lengths.first == nil || Int(lengths.first!) != nil else {
+            respond(fd, status: "400 Bad Request", body: Data()); return
+        }
+        let contentLength = lengths.first.flatMap(Int.init) ?? 0
+        guard contentLength >= 0 && contentLength <= 2 * 1024 * 1024 else {
+            respond(fd, status: "413 Payload Too Large", body: Data()); return
+        }
+        var body = Data(request[separator.upperBound...])
+        while body.count < contentLength {
+            let count = recv(fd, &buffer, min(buffer.count, contentLength - body.count), 0)
+            if count <= 0 { respond(fd, status: "400 Bad Request", body: Data()); return }
+            body.append(contentsOf: buffer[..<count])
+        }
+        if body.count > contentLength { body = Data(body.prefix(contentLength)) }
+        var headers: [String: [String]] = [:]
+        for line in lines.dropFirst() {
+            guard let split = line.firstIndex(of: ":") else { continue }
+            let name = line[..<split].trimmingCharacters(in: .whitespaces).lowercased()
+            let value = line[line.index(after: split)...].trimmingCharacters(in: .whitespaces)
+            headers[name, default: []].append(value)
+        }
+        if rawPath == "/api/opencode/status" || rawPath == "/api/opencode/start" {
+            if rawPath == "/api/opencode/start" {
+                guard validStartHeaders(origins: headerValues(lines, named: "origin"), contentLengths: lengths,
+                                        transferEncodings: transfer, body: String(data: body, encoding: .utf8) ?? "") else {
+                    respond(fd, status: "403 Forbidden", body: Data()); return
+                }
+            }
+            let data = rawPath.hasSuffix("/start") ? NativeOpenCode.start() : NativeOpenCode.status()
+            respond(fd, status: "200 OK", body: data, type: "application/json; charset=utf-8", head: head); return
+        }
+        if rawPath.hasPrefix("/api/opencode/") {
+            let result = OpenCodeProxy.handle(method: method, target: rawTarget, headers: headers, body: body)
+            let status: String
+            switch result.status {
+            case 200: status="200 OK"; case 201: status="201 Created"; case 204: status="204 No Content"
+            case 400: status="400 Bad Request"; case 401: status="401 Unauthorized"; case 403: status="403 Forbidden"
+            case 404: status="404 Not Found"; case 405: status="405 Method Not Allowed"; case 410: status="410 Gone"
+            case 413: status="413 Payload Too Large"; case 502: status="502 Bad Gateway"; case 503: status="503 Service Unavailable"
+            default: status="\(result.status) Error"
+            }
+            respond(fd, status: status, body: result.data, type: "application/json; charset=utf-8"); return
+        }
+        if rawPath == "/api/health" {
+            respond(fd, status: "200 OK", body: Data("wps-spreadsheet-proofreading-ready".utf8), type: "text/plain; charset=utf-8"); return
+        }
+        guard let decoded = rawPath.removingPercentEncoding, decoded.hasPrefix("/"),
+              !decoded.contains("\\"), !decoded.contains("\0") else {
+            respond(fd, status: "400 Bad Request", body: Data()); return
+        }
+        let path = decoded == "/" ? "index.html" : String(decoded.dropFirst())
+        let segments = path.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+        guard !segments.contains(where: { $0.isEmpty || $0 == "." || $0 == ".." || $0.hasPrefix(".") }),
+              let firstSegment = segments.first,
+              (["index.html", "main.js", "ribbon.xml", "package.json"].contains(path) || ["ui","js","rules"].contains(firstSegment)),
+              let ext = path.split(separator: ".").last.map(String.init), types[ext] != nil else {
+            respond(fd, status: "400 Bad Request", body: Data()); return
+        }
+        let file = Paths.addon.appendingPathComponent(path)
+        guard let data = try? Data(contentsOf: file, options: .mappedIfSafe) else {
+            respond(fd, status: "404 Not Found", body: Data()); return
+        }
+        respond(fd, status: "200 OK", body: data, type: types[ext]! + "; charset=utf-8", head: head)
+    }
+}
+
+private final class AppController: NSObject, NSApplicationDelegate {
+    private var window: NSWindow!
+    private var status: NSTextField!
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        let width: CGFloat = 520
+        let height: CGFloat = 310
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: width, height: height),
+                          styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
+        window.title = "WPS 表格校改 · Mac 安装"
+        window.center()
+        let content = window.contentView!
+        func label(_ text: String, y: CGFloat, size: CGFloat, bold: Bool = false) -> NSTextField {
+            let view = NSTextField(labelWithString: text)
+            view.frame = NSRect(x: 28, y: y, width: width - 56, height: 45)
+            view.font = bold ? .boldSystemFont(ofSize: size) : .systemFont(ofSize: size)
+            view.maximumNumberOfLines = 3
+            view.lineBreakMode = .byWordWrapping
+            content.addSubview(view)
+            return view
+        }
+        _ = label("WPS 表格校改", y: 250, size: 20, bold: true)
+        _ = label("将本应用放进“应用程序”后点击安装。安装会注册 WPS 加载项，并启动本机网页服务。", y: 192, size: 13)
+        _ = label("校对模型请在 WPS 任务窗格内连接 OpenCode、Ollama 或兼容接口。安装后请完全退出并重新打开 WPS。", y: 133, size: 13)
+        status = label("尚未安装", y: 85, size: 12)
+        let install = NSButton(title: "安装并启动", target: self, action: #selector(installClicked))
+        install.frame = NSRect(x: 28, y: 26, width: 130, height: 32)
+        content.addSubview(install)
+        let remove = NSButton(title: "卸载服务", target: self, action: #selector(removeClicked))
+        remove.frame = NSRect(x: 170, y: 26, width: 110, height: 32)
+        content.addSubview(remove)
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        if FileManager.default.fileExists(atPath: Paths.agent.path) { status.stringValue = "已安装。若移动过应用，请再次点击“安装并启动”。" }
+    }
+
+    @objc private func installClicked() {
+        if Paths.executable.hasPrefix("/Volumes/") {
+            status.stringValue = "请先把应用拖入“应用程序”，再打开安装。"
+            return
+        }
+        do {
+            let originalAgent = try? Data(contentsOf: Paths.agent)
+            if FileManager.default.fileExists(atPath: Paths.agent.path) && originalAgent == nil {
+                throw InstallerError.message("无法读取现有 LaunchAgent，已停止安装。")
+            }
+            var registrationSnapshot: [URL: Data?] = [:]
+            try InstallTransaction.run(preflight: {
+                guard StaticServer.portIsAvailable(servicePort) || StaticServer.isOwnServerHealthy()
+                        || FileManager.default.fileExists(atPath: Paths.agent.path) else {
+                    throw InstallerError.message("端口 3892 已被占用，无法安装本机服务。")
+                }
+                for name in ["index.html", "main.js", "ribbon.xml", "package.json", "ui/taskpane.html",
+                             "ui/taskpane.css", "js/taskpane.js", "js/spreadsheet-integration.js",
+                             "js/model-client.js", "rules/catalog.json"] {
+                    guard FileManager.default.fileExists(atPath: Paths.addon.appendingPathComponent(name).path) else {
+                        throw InstallerError.message("安装包缺少加载项文件：\(name)。")
+                    }
+                }
+            }, register: {
+                let result = try WPSRegistration.write(install: true)
+                registrationSnapshot = result.previous
+                status.stringValue = "已安装并启动。已注册 \(result.files.count) 个 WPS 目录；请重启 WPS。"
+            }, start: {
+                try LoginService.install()
+            }, rollback: {
+                try WPSRegistration.rollback(registrationSnapshot)
+                try LoginService.remove()
+                if let originalAgent {
+                    try originalAgent.write(to: Paths.agent, options: .atomic)
+                    try LoginService.launchctl(["bootstrap", "gui/\(getuid())", Paths.agent.path])
+                }
+            })
+        } catch {
+            status.stringValue = error.localizedDescription
+        }
+    }
+
+    @objc private func removeClicked() {
+        do {
+            try LoginService.remove()
+            _ = try WPSRegistration.write(install: false)
+            status.stringValue = "已移除登录服务和 WPS 注册项，可以删除本应用。"
+        } catch {
+            status.stringValue = error.localizedDescription
+        }
+    }
+}
+
+if CommandLine.arguments.contains("--self-test") {
+    let multiple = "<?xml version=\"1.0\"?><jsplugins><jspluginonline name=\"other-addon\"/><jspluginonline name=\"second-addon\"/></jsplugins>"
+    let added = try! WPSRegistration.update(multiple, install: true)
+    let repeated = try! WPSRegistration.update(added, install: true)
+    let removed = try! WPSRegistration.update(repeated, install: false)
+    let removedAgain = try! WPSRegistration.update(removed, install: false)
+    let unrelated = try! WPSRegistration.update("<jsplugins><jspluginonline name=\"wps-text-proofreading\"/><jspluginonline name=\"wordollama-wps-native\"/></jsplugins>", install: true)
+    let malformedRejected = (try? WPSRegistration.update("<jsplugins><jspluginonline name=\"other-addon\"/>", install: true)) == nil
+    let brokenRejected = (try? WPSRegistration.update("<jsplugins><broken></jsplugins>", install: false)) == nil
+    let wrongRootRejected = (try? WPSRegistration.update("<other><jsplugins></jsplugins></other>", install: true)) == nil
+    let emptyCreated = (try? WPSRegistration.update("", install: true))?.contains("<jsplugins>") == true
+    let temp = FileManager.default.temporaryDirectory.appendingPathComponent("wps-spreadsheet-proofreading-selftest-\(UUID().uuidString)", isDirectory: true)
+    try! FileManager.default.createDirectory(at: temp, withIntermediateDirectories: true)
+    let tempPublish = temp.appendingPathComponent("publish.xml")
+    let backup = URL(fileURLWithPath: tempPublish.path + ".wps-spreadsheet-proofreading.bak")
+    let original = Data("<jsplugins><jspluginonline name=\"keep-me\"/></jsplugins>".utf8)
+    try! original.write(to: tempPublish)
+    try! Data("stale backup".utf8).write(to: backup)
+    _ = try! WPSRegistration.write(install: true, files: [tempPublish])
+    let backupUpdated = (try? Data(contentsOf: backup)) == original
+    let fileAfterInstall = try! String(contentsOf: tempPublish, encoding: .utf8)
+    _ = try! WPSRegistration.write(install: true, files: [tempPublish])
+    let installIdempotent = (try! String(contentsOf: tempPublish, encoding: .utf8)) == fileAfterInstall
+    _ = try! WPSRegistration.write(install: false, files: [tempPublish])
+    let onceUninstalled = try! String(contentsOf: tempPublish, encoding: .utf8)
+    _ = try! WPSRegistration.write(install: false, files: [tempPublish])
+    let uninstallIdempotent = (try! String(contentsOf: tempPublish, encoding: .utf8)) == onceUninstalled
+    var registeredDuringFailure = false
+    let startupFailed: Bool
+    let installFailureTarget = temp.appendingPathComponent("startup-failure.xml")
+    try! original.write(to: installFailureTarget)
+    var installRegistrationSnapshot: [URL: Data?] = [:]
+    do {
+        try InstallTransaction.run(preflight: {}, register: {
+            let result = try WPSRegistration.write(install: true, files: [installFailureTarget])
+            installRegistrationSnapshot = result.previous
+            registeredDuringFailure = true
+        }, start: { throw InstallerError.message("stub startup failure") }, rollback: {
+            try! WPSRegistration.rollback(installRegistrationSnapshot)
+        })
+        startupFailed = false
+    } catch { startupFailed = true }
+    let registrationUntouched = registeredDuringFailure && (try! Data(contentsOf: installFailureTarget)) == original
+    let damagedPublish = temp.appendingPathComponent("damaged.xml")
+    let damagedBytes = Data("<jsplugins><broken></jsplugins>".utf8)
+    try! damagedBytes.write(to: damagedPublish)
+    _ = try? WPSRegistration.write(install: true, files: [damagedPublish])
+    let damagedUnchanged = (try? Data(contentsOf: damagedPublish)) == damagedBytes
+    let batchTarget = temp.appendingPathComponent("batch.xml")
+    try! original.write(to: batchTarget)
+    _ = try? WPSRegistration.write(install: true, files: [batchTarget, damagedPublish])
+    let batchRolledBack = (try? Data(contentsOf: batchTarget)) == original
+    let emptyTarget = temp.appendingPathComponent("empty.xml")
+    try! Data().write(to: emptyTarget)
+    _ = try! WPSRegistration.write(install: true, files: [emptyTarget])
+    let emptyFileCreated = ((try? String(contentsOf: emptyTarget, encoding: .utf8)) ?? "").contains("<jsplugins>")
+
+    let userHome = temp.appendingPathComponent("home").path
+    let pathDir = temp.appendingPathComponent("path-opencode").path
+    let brewDir = temp.appendingPathComponent("brew").path
+    let localDir = temp.appendingPathComponent("local-bin").path
+    let pathSearch = NativeOpenCode.searchDirectories(path: pathDir, home: userHome, homebrewArm: brewDir, usrLocal: localDir)
+    let pathFound = NativeOpenCode.findExecutable(directories: pathSearch) { $0 == pathDir + "/opencode" }?.path == pathDir + "/opencode"
+    let hiddenDir = userHome + "/.opencode/bin"
+    let hiddenFound = NativeOpenCode.findExecutable(directories: NativeOpenCode.searchDirectories(path: "", home: userHome, homebrewArm: brewDir, usrLocal: localDir)) { $0 == hiddenDir + "/opencode" }?.path == hiddenDir + "/opencode"
+    let brewFound = NativeOpenCode.findExecutable(directories: [brewDir, localDir]) { $0 == brewDir + "/opencode" }?.path == brewDir + "/opencode"
+    let usrLocalFound = NativeOpenCode.findExecutable(directories: [localDir]) { $0 == localDir + "/opencode" }?.path == localDir + "/opencode"
+    let notFound = NativeOpenCode.findExecutable(directories: pathSearch) { _ in false } == nil
+    let healthyBody = Data("{\"healthy\":true,\"version\":\"1.2.3\"}".utf8)
+    let healthyStatus = NativeOpenCode.classifyHealth(status: 200, body: healthyBody, errorCode: nil)
+    let noProcessStatus = NativeOpenCode.classifyHealth(status: nil, body: nil, errorCode: NSURLErrorCannotConnectToHost)
+    let timeoutStatus = NativeOpenCode.classifyHealth(status: nil, body: nil, errorCode: NSURLErrorTimedOut)
+    let httpErrorStatus = NativeOpenCode.classifyHealth(status: 503, body: Data(), errorCode: nil)
+    let nonOpenCodeStatus = NativeOpenCode.classifyHealth(status: 200, body: Data("{}".utf8), errorCode: nil)
+    let healthChecks = healthyStatus.state == .ready && healthyStatus.version == "1.2.3"
+        && noProcessStatus.state == .absent && timeoutStatus.state == .conflict
+        && httpErrorStatus.state == .conflict && nonOpenCodeStatus.state == .conflict
+    let lifecycleExecutable = temp.appendingPathComponent("fake-opencode")
+    try! "#!/bin/sh\nexec /bin/sleep 30\n".write(to: lifecycleExecutable, atomically: true, encoding: .utf8)
+    try! FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: lifecycleExecutable.path)
+    func lifecycleStart(_ probe: () -> NativeOpenCode.HealthResult) -> [String: Any] {
+        let data = NativeOpenCode.start(discover: { lifecycleExecutable }, healthProbe: probe,
+                                        versionProbe: { _ in "v-test" }, timeout: 0.05,
+                                        pollInterval: 0.005, logDirectory: temp.appendingPathComponent("logs"))
+        return (try! JSONSerialization.jsonObject(with: data)) as! [String: Any]
+    }
+    var timedOutRun: NativeOpenCode.ManagedRun?
+    let timedOut = lifecycleStart {
+        if let run = NativeOpenCode.child { timedOutRun = run }
+        return NativeOpenCode.HealthResult(state: NativeOpenCode.child == nil ? .absent : .conflict, version: "")
+    }
+    let timeoutCleaned = timedOut["state"] as? String == "error"
+        && timedOut["managed"] as? Bool == false && NativeOpenCode.child == nil
+        && timedOutRun != nil && timedOutRun?.process.isRunning == false
+    var retryProbes = 0
+    let retried = lifecycleStart {
+        retryProbes += 1
+        let state: NativeOpenCode.Health = retryProbes == 1 ? .absent : (retryProbes == 2 ? .conflict : .ready)
+        return NativeOpenCode.HealthResult(state: state, version: "v-test")
+    }
+    let retryRun = NativeOpenCode.child
+    if let old = timedOutRun { NativeOpenCode.stopManagedChild(old) }
+    let retryStarted = retried["state"] as? String == "ready" && retried["managed"] as? Bool == true
+        && retryRun != nil && retryRun !== timedOutRun && retryRun?.process.isRunning == true
+        && NativeOpenCode.child === retryRun
+    // An already managed process must also be cleaned up on a later timeout.
+    let managedTimeout = lifecycleStart { NativeOpenCode.HealthResult(state: .conflict, version: "") }
+    let existingManagedCleaned = managedTimeout["state"] as? String == "error"
+        && NativeOpenCode.child == nil && retryRun?.process.isRunning == false
+    let userProcess = Process()
+    userProcess.executableURL = URL(fileURLWithPath: "/bin/sleep")
+    userProcess.arguments = ["30"]
+    try! userProcess.run()
+    let userReady = lifecycleStart { NativeOpenCode.HealthResult(state: .ready, version: "v-user") }
+    let userPreserved = userReady["state"] as? String == "ready" && userReady["managed"] as? Bool == false
+        && NativeOpenCode.child == nil && userProcess.isRunning
+    userProcess.terminate()
+    userProcess.waitUntilExit()
+    let lifecycleCleanup = timeoutCleaned && retryStarted && existingManagedCleaned && userPreserved
+    let methodChecks = StaticServer.allowsMethod("POST", path: "/api/opencode/start")
+        && !StaticServer.allowsMethod("POST", path: "/api/opencode/status")
+        && StaticServer.validHostHeaders(["127.0.0.1:3892"], port: 3892)
+        && !StaticServer.validHostHeaders(["127.0.0.1:3892", "evil.invalid"], port: 3892)
+        && StaticServer.validStartHeaders(origins: ["http://127.0.0.1:3892"], contentLengths: ["0"], transferEncodings: [], body: "")
+        && !StaticServer.validStartHeaders(origins: ["http://127.0.0.1:3892", "https://evil.invalid"], contentLengths: [], transferEncodings: [], body: "")
+    try? FileManager.default.removeItem(at: temp)
+    guard added.contains("name=\"other-addon\""), added.contains("name=\"second-addon\""), repeated == added,
+          removed.contains("name=\"other-addon\""), removed.contains("name=\"second-addon\""), !removed.contains("name=\"\(addonName)\""), removedAgain == removed,
+          unrelated.contains("name=\"\(addonName)\""), unrelated.contains("wps-text-proofreading"), unrelated.contains("wordollama-wps-native"), malformedRejected, brokenRejected, wrongRootRejected, emptyCreated,
+          backupUpdated, installIdempotent, uninstallIdempotent, startupFailed, registrationUntouched,
+          damagedUnchanged, batchRolledBack, emptyFileCreated, pathFound, hiddenFound, brewFound, usrLocalFound,
+          notFound, healthChecks, lifecycleCleanup, methodChecks else {
+        fputs("WPS 注册项自检失败。\n", stderr)
+        exit(1)
+    }
+    print("WPS 注册项自检通过。")
+} else if CommandLine.arguments.contains("--serve") {
+    let args = CommandLine.arguments
+    let index = args.firstIndex(of: "--port")
+    let port = index.flatMap { $0 + 1 < args.count ? UInt16(args[$0 + 1]) : nil } ?? servicePort
+    do { try StaticServer.run(port: port) }
+    catch { fputs(error.localizedDescription + "\n", stderr); exit(1) }
+} else {
+    let app = NSApplication.shared
+    let controller = AppController()
+    app.delegate = controller
+    app.setActivationPolicy(.regular)
+    app.run()
+}

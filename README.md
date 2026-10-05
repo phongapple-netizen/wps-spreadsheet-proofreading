@@ -76,3 +76,10 @@ OpenCode 模型填写 `provider/model`。Ollama 默认 `http://127.0.0.1:11434`�
 7. 开启深度增强检查数量不一致；改写数字或日期时检查风险阻止，安全改写检查替换与撤销。
 
 来源与改造范围见 [SOURCE_PROVENANCE.md](SOURCE_PROVENANCE.md)。项目保留 GPL-3.0 许可证。
+
+
+## 安装包
+
+v0.2.0 起提供 Windows x64 与 macOS 11+（Intel/Apple 芯片）测试安装包。Windows 使用独立的 `WPSSpreadsheetProofreading` 安装目录、自启动项与卸载项；macOS 使用独立 App、LaunchAgent 与日志目录。两平台只注册 `wps-spreadsheet-proofreading`（type=`et`），不会删除或覆盖 WPS 文字校改的注册与启动项。
+
+表格版本地网页服务固定监听 `127.0.0.1:3892`，默认通过同源受限代理复用 OpenCode `127.0.0.1:4096`；文字版与表格版可以同时安装和使用。
