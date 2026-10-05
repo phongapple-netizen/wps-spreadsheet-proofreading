@@ -39,15 +39,29 @@
             <label id="deep-enhance-control" class="toolbar-deep" for="deep-enhance">
                 <input id="deep-enhance" type="checkbox"><span>深度增强</span>
             </label>
-            </div>
+        </div>
         <section class="panel run-panel">
-            <label class="field-label scope-label" for="proofreading-scope">校对范围</label>
-            <select id="proofreading-scope" class="field-control">
+            <span id="scope-label" class="sr-only">校对范围</span>
+            <div id="scope-switch" class="scope-switch" role="radiogroup" aria-labelledby="scope-label">
+                <button id="scope-selection" class="scope-option is-active" type="button" role="radio" aria-checked="true" tabindex="0" data-scope="selection">选区</button>
+                <button id="scope-sheet" class="scope-option" type="button" role="radio" aria-checked="false" tabindex="-1" data-scope="sheet">当前表</button>
+                <button id="scope-workbook" class="scope-option" type="button" role="radio" aria-checked="false" tabindex="-1" data-scope="workbook">工作簿</button>
+            </div>
+            <select id="proofreading-scope" class="scope-state-control" aria-hidden="true" tabindex="-1" hidden>
                 <option value="selection">当前选区</option>
                 <option value="sheet">当前工作表</option>
                 <option value="workbook">整个工作簿</option>
             </select>
+            <p id="proofreading-scope-summary" class="scope-summary" role="status" aria-live="polite">当前选区</p>
 
+            <div id="scope-confirmation" class="scope-confirmation" role="group" aria-labelledby="scope-confirmation-title" hidden>
+                <p id="scope-confirmation-title" class="scope-confirmation-title"></p>
+                <p id="scope-confirmation-message" class="scope-confirmation-message"></p>
+                <div class="scope-confirmation-actions">
+                    <button id="confirm-scope-run" class="button button-primary" type="button">继续校对</button>
+                    <button id="cancel-scope-run" class="button button-secondary" type="button">取消</button>
+                </div>
+            </div>
 
             <div id="proofreading-progress" class="progress" hidden>
                 <div class="progress-track"><div id="progress-fill" class="progress-fill"></div></div>
@@ -67,13 +81,19 @@
                 <div id="proofreading-status" class="status status-idle status-compact" role="status" aria-live="polite">等待开始</div>
             </div>
             <div id="proofreading-toast" class="proofreading-toast" role="status" aria-live="polite" hidden></div>
-            <div class="results-scroll">
+            <div id="results-scroll" class="results-scroll">
             <div id="empty-start" class="empty-start">
             <p class="empty-guidance">选择校对范围后，插件只读取其中可编辑的文本单元格。</p>
             <div id="empty-state" class="empty-state">校对结果会显示在这里。</div>
             <button id="run-proofreading" class="button button-primary" type="button">开始校对</button>
             <p id="proofreading-mode-hint" class="empty-hint">先跑本地规则，再由模型分批复核</p></div>
-            <div id="proofreading-issues" class="issue-list" hidden></div>
+            <div id="proofreading-issues" class="issue-list" hidden>
+                <div id="pending-issues" class="pending-issues"></div>
+                <details id="processed-issues" class="processed-issues" hidden>
+                    <summary class="processed-issues-summary">已处理（<span id="processed-issue-count">0</span>）</summary>
+                    <div id="processed-issues-list" class="processed-issues-list"></div>
+                </details>
+            </div>
             <div id="history-empty" class="empty-state" hidden>本次会话还没有处理记录。</div>
             <div id="proofreading-history" class="history-list" hidden></div>
             </div>
@@ -81,8 +101,13 @@
                 <div class="apply-all-wrap">
                     <button id="apply-all" class="button button-secondary" type="button" title="仅处理低风险格式规则，其他建议需逐条确认" disabled>一键修正（0）</button>
                 </div>
-                <button id="export-results" class="button button-secondary" type="button">导出结果</button>
                 <button id="rerun-proofreading" class="button button-secondary" type="button">↻ 重新校对</button>
+                <details id="result-more" class="result-more">
+                    <summary class="result-more-toggle" aria-label="更多结果操作" title="更多">···</summary>
+                    <div class="result-more-menu">
+                        <button id="export-results" class="result-more-item" type="button">导出结果</button>
+                    </div>
+                </details>
             </div>
         </section>
 
@@ -96,6 +121,7 @@
                     <span class="rewrite-mode-label">理顺改写</span>
                 </div>
                 <p id="rewrite-selection-count" class="field-note rewrite-selection-count">仅支持改写当前选区中的一个文本单元格。</p>
+                <p id="rewrite-selection-location" class="rewrite-selection-location" hidden></p>
                 <p class="field-note rewrite-guard-note">在不改变事实、数字、时间、单位、主体和政策含义的前提下，理顺逻辑、调整层次、精简重复表达，使文字更规范流畅。</p>
                 <label class="field-label" for="rewrite-requirements">改写要求（可选）</label>
                 <textarea id="rewrite-requirements" class="field-control rewrite-requirements" rows="3" maxlength="500"

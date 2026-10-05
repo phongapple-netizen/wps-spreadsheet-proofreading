@@ -7,6 +7,7 @@ const path = require("node:path");
 
 const html = fs.readFileSync(path.join(__dirname, "../ui/taskpane.html"), "utf8");
 const source = fs.readFileSync(path.join(__dirname, "../js/taskpane.js"), "utf8");
+const css = fs.readFileSync(path.join(__dirname, "../ui/taskpane.css"), "utf8");
 const ids = Array.from(html.matchAll(/\bid="([^"]+)"/g), match => match[1]);
 
 class Element {
@@ -16,15 +17,24 @@ class Element {
     this.id = id; this.value = ""; this.textContent = ""; this.innerHTML = ""; this.hidden = false;
     this.disabled = false; this.checked = false; this.dataset = {}; this.style = {}; this.attributes = {};
     this.listeners = {}; this.children = []; this.options = this.children;
-    this.className = ""; this.classList = { toggle: (name, force) => { const set = new Set(this.className.split(/\s+/).filter(Boolean)); if (force) set.add(name); else set.delete(name); this.className = Array.from(set).join(" "); } };
+    this.className = ""; this.tabIndex = -1; this.scrollTop = 0; this.parentNode = null;
+    this.classList = { toggle: (name, force) => { const set = new Set(this.className.split(/\s+/).filter(Boolean)); if (force) set.add(name); else set.delete(name); this.className = Array.from(set).join(" "); } };
   }
   addEventListener(type, callback) { (this.listeners[type] ||= []).push(callback); }
   dispatch(type, extra = {}) { for (const callback of this.listeners[type] || []) callback(Object.assign({ target: this, stopPropagation() {} }, extra)); }
   setAttribute(name, value) { this.attributes[name] = String(value); }
-  appendChild(child) { this.children.push(child); child.parentNode = this; return child; }
-  removeChild(child) { this.children = this.children.filter(item => item !== child); }
+  appendChild(child) { return this.insertBefore(child, null); }
+  insertBefore(child, reference) {
+    if (child.parentNode) child.parentNode.removeChild(child);
+    const index = reference ? this.children.indexOf(reference) : -1;
+    if (index < 0) this.children.push(child); else this.children.splice(index, 0, child);
+    child.parentNode = this;
+    return child;
+  }
+  removeChild(child) { this.children = this.children.filter(item => item !== child); child.parentNode = null; return child; }
   remove() { if (this.parentNode) this.parentNode.removeChild(this); }
   click() { this.clicked = true; }
+  focus() { this.focused = true; }
   select() {}
 }
 
@@ -54,7 +64,7 @@ function makeRuntime(options = {}) {
       ollama: { endpoint: "http://127.0.0.1:11434", model: "qwen:latest" },
       openai: { endpoint: "https://api.example.test/v1", model: "compat-model" }
     }, credentials: { opencode: { password: "only-opencode" }, ollama: {}, openai: {} },
-    rulesOnly: false, scope: "selection", concurrency: 2
+    rulesOnly: false, scope: options.scope || "selection", concurrency: 2
   };
   function currentSettings() {
     const p = profileStore.provider, profile = profileStore.profiles[p];
@@ -107,6 +117,13 @@ function makeRuntime(options = {}) {
 }
 
 function click(el) { el.dispatch("click"); }
+function actionTarget(action, id) {
+  return { closest(selector) {
+    if (selector === ".issue-analysis summary" || selector === ".issue-analysis") return null;
+    if (selector === "[data-action]") return { dataset: { action, id } };
+    return null;
+  } };
+}
 
 test("proofreading errors and stale-cell warnings remain visible", () => {
   const { root, elements } = makeRuntime();
@@ -166,15 +183,18 @@ test("opening settings reads models without starting OpenCode and keeps all choi
 test("Word-style cards expand and locate while actions keep their own targets", () => {
   const { root, elements, calls } = makeRuntime();
   root.setSpreadsheetIssues([{ id: 'i1', address: 'B3', sheetName: 'Data', original: '<通到>', suggestion: '通道', reason: '错别字', status: 'pending', actionable: true }]);
-  assert.match(elements['proofreading-issues'].innerHTML, /issue-card-header/);
-  assert.match(elements['proofreading-issues'].innerHTML, /preview-old/);
-  assert.match(elements['proofreading-issues'].innerHTML, /&lt;通到&gt;/);
-  assert.match(elements['proofreading-issues'].innerHTML, /aria-expanded="false"/);
-  const target = { closest(selector) { return selector === '.issue-analysis' ? null : { dataset: { action: 'locate', id: 'i1' } }; } };
-  elements['proofreading-issues'].dispatch('click', { target });
-  assert.match(elements['proofreading-issues'].innerHTML, /aria-expanded="true"/);
+  const card = elements['pending-issues'].children[0];
+  assert.match(card.innerHTML, /issue-card-header/);
+  assert.match(card.innerHTML, /preview-old/);
+  assert.match(card.innerHTML, /&lt;通/);
+  assert.equal(card.attributes['aria-expanded'], 'false');
+  assert.match(card.innerHTML, /cell-address/);
+  assert.match(card.innerHTML, /issue-kind/);
+  elements['proofreading-issues'].dispatch('click', { target: actionTarget('locate', 'i1') });
+  assert.equal(elements['pending-issues'].children[0], card);
+  assert.equal(card.attributes['aria-expanded'], 'true');
   assert.deepEqual(calls.at(-1), ['locate', 'i1']);
-  elements['proofreading-issues'].dispatch('click', { target: { closest(selector) { return selector === '.issue-analysis' ? null : { dataset: { action: 'apply', id: 'i1' } }; } } });
+  elements['proofreading-issues'].dispatch('click', { target: actionTarget('apply', 'i1') });
   assert.deepEqual(calls.at(-1), ['apply', 'i1']);
 });
 
@@ -220,10 +240,12 @@ test("review-only issues are labeled and stale items stay outside processed tota
     { id: "review", address: "A1", sheetName: "Data", original: "x", suggestion: "", status: "pending", actionable: false, category: "rule" },
     { id: "stale", address: "A2", sheetName: "Data", original: "m", suggestion: "n", status: "stale", actionable: true, category: "typo" }
   ]);
-  assert.match(elements["proofreading-issues"].innerHTML, /需人工核对/);
-  assert.doesNotMatch(elements["proofreading-issues"].innerHTML, /data-action="save-rule"/);
+  assert.match(elements["pending-issues"].children[0].innerHTML, /需人工核对/);
+  assert.doesNotMatch(elements["pending-issues"].children[0].innerHTML, /data-action="save-rule"/);
   assert.match(elements["result-summary"].textContent, /已处理 0/);
   assert.equal(elements["result-stale-summary"].textContent, "需重查 1");
+  assert.equal(elements["pending-issues"].children.length, 2);
+  assert.equal(elements["processed-issues"].hidden, true);
 });
 
 test("export button downloads structured JSON", async () => {
@@ -285,4 +307,132 @@ test("late model response after provider switch cannot populate the new provider
   assert.equal(elements["model-name"].value, "qwen:latest");
   assert.doesNotMatch(elements["model-suggestions"].innerHTML, /stale-opencode-model/);
   assert.equal(root.WpsSpreadsheetSettings.get().provider, "ollama");
+});
+
+test("range segments map to stored scope values and restore the last choice", () => {
+  const { elements, profileStore } = makeRuntime();
+  elements["scope-sheet"].dispatch("click");
+  assert.equal(elements["proofreading-scope"].value, "sheet");
+  assert.equal(elements["proofreading-scope-summary"].textContent, "当前工作表");
+  assert.equal(elements["scope-sheet"].attributes["aria-checked"], "true");
+  assert.equal(elements["scope-sheet"].tabIndex, 0);
+  assert.equal(profileStore.scope, "sheet");
+  elements["scope-sheet"].dispatch("keydown", { key: "ArrowRight", preventDefault() { this.prevented = true; } });
+  assert.equal(elements["proofreading-scope"].value, "workbook");
+  assert.equal(elements["scope-workbook"].focused, true);
+  assert.equal(profileStore.scope, "workbook");
+  const restored = makeRuntime({ scope: profileStore.scope });
+  assert.equal(restored.elements["proofreading-scope"].value, "workbook");
+  assert.equal(restored.elements["scope-workbook"].attributes["aria-checked"], "true");
+  assert.equal(restored.elements["proofreading-scope-summary"].textContent, "整个工作簿");
+});
+
+test("scope segment controls stay disabled while proofreading is running", () => {
+  const { root, elements } = makeRuntime();
+  root.setSpreadsheetBusy(true);
+  for (const id of ["scope-selection", "scope-sheet", "scope-workbook"]) assert.equal(elements[id].disabled, true);
+  root.setSpreadsheetBusy(false);
+  for (const id of ["scope-selection", "scope-sheet", "scope-workbook"]) assert.equal(elements[id].disabled, false);
+});
+
+test("worksheet and workbook AI runs show an inline confirmation before invoking the integration", () => {
+  const { elements, calls } = makeRuntime();
+  elements["scope-sheet"].dispatch("click");
+  click(elements["run-proofreading"]);
+  assert.equal(elements["scope-confirmation"].hidden, false);
+  assert.equal(elements["scope-confirmation-title"].textContent, "确认校对当前工作表");
+  assert.match(elements["scope-confirmation-message"].textContent, /公式、数字和空单元格会自动跳过/);
+  assert.equal(calls.some(call => call[0] === "run"), false);
+  click(elements["confirm-scope-run"]);
+  assert.equal(elements["scope-confirmation"].hidden, true);
+  assert.equal(calls.at(-1)[0], "run");
+  assert.equal(calls.at(-1)[1].scope, "sheet");
+
+  elements["scope-workbook"].dispatch("click");
+  click(elements["rerun-proofreading"]);
+  assert.equal(elements["scope-confirmation-title"].textContent, "确认校对整个工作簿");
+  assert.match(elements["scope-confirmation-message"].textContent, /敏感内容/);
+  click(elements["cancel-scope-run"]);
+  assert.equal(elements["scope-confirmation"].hidden, true);
+  assert.equal(elements["proofreading-status"].textContent, "已取消校对");
+  assert.equal(calls.filter(call => call[0] === "run").length, 1);
+});
+
+test("selection AI and rules-only runs do not add an inline scope confirmation", () => {
+  const { elements, calls } = makeRuntime();
+  click(elements["run-proofreading"]);
+  assert.equal(elements["scope-confirmation"].hidden, true);
+  assert.equal(calls.at(-1)[0], "run");
+  elements["scope-sheet"].dispatch("click");
+  elements["rules-only"].checked = true;
+  click(elements["rerun-proofreading"]);
+  assert.equal(elements["scope-confirmation"].hidden, true);
+  assert.equal(calls.at(-1)[1].rulesOnly, true);
+  assert.equal(calls.at(-1)[1].scope, "sheet");
+});
+
+test("applied, ignored, and reverted issues are tucked into the processed group while stale stays actionable", () => {
+  const { root, elements } = makeRuntime();
+  root.setSpreadsheetIssues([
+    { id: "pending", address: "A1", sheetName: "Data", original: "a", suggestion: "b", status: "pending" },
+    { id: "stale", address: "A2", sheetName: "Data", original: "c", suggestion: "d", status: "stale" },
+    { id: "applied", address: "A3", sheetName: "Data", original: "e", suggestion: "f", status: "applied" },
+    { id: "ignored", address: "A4", sheetName: "Data", original: "g", suggestion: "h", status: "ignored" },
+    { id: "reverted", address: "A5", sheetName: "Data", original: "i", suggestion: "j", status: "reverted" }
+  ]);
+  assert.deepEqual(elements["pending-issues"].children.map(card => card.dataset.issueId), ["pending", "stale"]);
+  assert.deepEqual(elements["processed-issues-list"].children.map(card => card.dataset.issueId), ["applied", "ignored", "reverted"]);
+  assert.equal(elements["processed-issues"].hidden, false);
+  assert.equal(elements["processed-issue-count"].textContent, "3");
+  assert.equal(elements["result-stale-summary"].textContent, "需重查 1");
+  assert.match(elements["result-summary"].textContent, /已处理 3/);
+});
+
+test("updating one issue reuses other card nodes and moves completed cards without rebuilding the list", () => {
+  const { root, elements } = makeRuntime();
+  const a = { id: "a", address: "A1", sheetName: "Data", original: "旧文", suggestion: "新文", status: "pending" };
+  const b = { id: "b", address: "A2", sheetName: "Data", original: "原句", suggestion: "建议", status: "pending" };
+  root.setSpreadsheetIssues([a, b]);
+  const aCard = elements["pending-issues"].children[0], bCard = elements["pending-issues"].children[1];
+  elements["results-scroll"].scrollTop = 72;
+  root.setSpreadsheetIssues([Object.assign({}, a, { status: "applied" }), b]);
+  assert.equal(elements["processed-issues-list"].children[0], aCard);
+  assert.equal(elements["pending-issues"].children[0], bCard);
+  assert.equal(elements["results-scroll"].scrollTop, 72);
+  assert.equal(elements["processed-issue-count"].textContent, "1");
+});
+
+test("expanded error analysis survives another card update and the unchanged card remains the same DOM node", () => {
+  const { root, elements } = makeRuntime();
+  const a = { id: "a", address: "A1", sheetName: "Data", original: "x", suggestion: "y", reason: "原因 A", status: "pending" };
+  const b = { id: "b", address: "A2", sheetName: "Data", original: "u", suggestion: "v", reason: "原因 B", status: "pending" };
+  root.setSpreadsheetIssues([a, b]);
+  const aCard = elements["pending-issues"].children[0], bCard = elements["pending-issues"].children[1];
+  const summary = { closest(selector) { return selector === ".issue-card" ? { dataset: { issueId: "a" } } : null; } };
+  const target = { closest(selector) { return selector === ".issue-analysis summary" ? summary : null; } };
+  elements["proofreading-issues"].dispatch("click", { target });
+  root.setSpreadsheetIssues([Object.assign({}, a, { status: "applied" }), b]);
+  assert.match(aCard.innerHTML, /<details class="issue-analysis" open>/);
+  assert.equal(elements["processed-issues-list"].children[0], aCard);
+  assert.equal(elements["pending-issues"].children[0], bCard);
+});
+
+test("export remains available from the low-frequency results menu and settings and rewrite controls remain present", () => {
+  const { elements, root } = makeRuntime();
+  const html = fs.readFileSync(path.join(__dirname, "../ui/taskpane.html"), "utf8");
+  assert.match(html, /<details id="result-more"[\s\S]*id="export-results"/);
+  for (const id of ["model-provider", "model-suggestions", "model-endpoint", "refresh-models", "rules-only", "auto-advance", "proofreading-concurrency", "proofreading-diagnostics-toggle", "app-version"]) assert.ok(elements[id], id);
+  for (const id of ["run-rewrite", "replace-rewrite", "regenerate-rewrite", "discard-rewrite", "undo-rewrite"]) assert.ok(elements[id], id);
+  root.setSpreadsheetRewrite({ sheetName: "Very long worksheet name", address: "B2", original: "原文", suggestion: "改写", status: "ready", risk: { level: "low", canReplace: true } });
+  assert.equal(elements["rewrite-selection-location"].textContent, "Q1 · B2");
+  assert.doesNotMatch(elements["rewrite-length-summary"].textContent, /Q1|Very long worksheet/);
+});
+
+test("scope, cards, settings and menus include narrow-pane layout safeguards", () => {
+  assert.match(css, /grid-template-columns:\s*repeat\(3, minmax\(0, 1fr\)\)/);
+  assert.match(css, /@media \(max-width: 360px\)/);
+  assert.match(css, /@media \(min-width: 400px\)/);
+  assert.match(css, /\.cell-sheet[\s\S]*?text-overflow:\s*ellipsis/);
+  assert.match(css, /\.issue-preview[\s\S]*?overflow-wrap:\s*anywhere/);
+  assert.match(css, /\.result-footer[\s\S]*?minmax\(0, 1fr\)/);
 });
