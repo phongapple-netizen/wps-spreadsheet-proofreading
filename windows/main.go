@@ -543,7 +543,7 @@ func installSteps(registerStep func() error, startStep func() (func() error, err
 
 func install() error {
 	if !portAvailable() {
-		return errors.New("端口 3891 已被占用，未写入 WPS 注册项")
+		return errors.New("端口 3892 已被占用，未写入 WPS 注册项")
 	}
 	addon, err := fs.Sub(embedded, "assets")
 	if err != nil {
@@ -755,7 +755,7 @@ func handler(addon fs.FS) http.Handler {
 			}
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
 			w.Header().Set("Cache-Control", "no-store")
-			_, _ = w.Write([]byte(`{"service":"wps-spreadsheet-proofreading","port":3891}`))
+			_, _ = w.Write([]byte(`{"service":"wps-spreadsheet-proofreading","port":3892}`))
 			return
 		}
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
@@ -863,7 +863,7 @@ func main() {
 			err = uninstall()
 		case "--check-port":
 			if !portAvailable() {
-				err = errors.New("端口 3891 已被占用")
+				err = errors.New("端口 3892 已被占用")
 			}
 		case "--self-test":
 			err = selfTest()
