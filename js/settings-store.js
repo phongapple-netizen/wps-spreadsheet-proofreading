@@ -11,6 +11,7 @@
   var runtimeEndpoints = Object.create(null);
   var runtimeCredentials = Object.create(null);
   var memoryStored = null;
+  var runtimeCatalogs = Object.create(null);
 
   function storages() {
     var result = [];
@@ -114,6 +115,7 @@
     });
     var next = {
       provider: provider, profiles: profiles,
+      catalogs: stored.catalogs || {},
       rulesOnly: patch.rulesOnly == null ? old.rulesOnly : patch.rulesOnly === true,
       deep: patch.deep == null ? old.deep : patch.deep === true,
       concurrency: patch.concurrency == null ? old.concurrency : Math.max(1, Math.min(4, Number(patch.concurrency) || 2)),
@@ -125,6 +127,24 @@
     return current();
   }
 
-  root.WpsSpreadsheetSettings = { get: get, update: update, KEY: KEY };
+  function saveCatalog(provider, endpoint, models) {
+    provider = providerOf(provider);
+    var catalog = { endpoint: validEndpoint(endpoint), models: Array.from(new Set((models || []).filter(function (name) {
+      return typeof name === "string" && name.trim() && name.length < 512;
+    }))).sort() };
+    runtimeCatalogs[provider] = catalog;
+    if (!loopbackEndpoint(catalog.endpoint)) return;
+    var stored = read() || {};
+    stored.catalogs = Object.assign({}, stored.catalogs || {});
+    stored.catalogs[provider] = catalog;
+    save(stored);
+  }
+  function loadCatalog(provider, endpoint) {
+    provider = providerOf(provider);
+    var stored = read() || {};
+    var catalog = runtimeCatalogs[provider] || (stored.catalogs || {})[provider];
+    return catalog && catalog.endpoint === validEndpoint(endpoint) && Array.isArray(catalog.models) ? catalog.models.slice() : [];
+  }
+  root.WpsSpreadsheetSettings = { get: get, update: update, saveCatalog: saveCatalog, loadCatalog: loadCatalog, KEY: KEY };
   if (typeof module !== "undefined" && module.exports) module.exports = root.WpsSpreadsheetSettings;
 })(typeof window !== "undefined" ? window : globalThis);

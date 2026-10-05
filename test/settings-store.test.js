@@ -69,3 +69,18 @@ test('only valid loopback endpoints persist in provider profiles', () => {
   const unsafe=store.update({endpoint:'http://user:pass@example.com'});
   assert.equal(unsafe.endpoint,'http://127.0.0.1:4555');
 });
+
+test('model catalog survives settings changes and reloads only for the matching provider and endpoint', () => {
+  const store = loadStore();
+  store.saveCatalog('opencode', 'http://127.0.0.1:4097', ['p/b', 'p/a', 'p/a']);
+  store.update({ model: 'p/b', deep: true, password: 'secret' });
+  delete require.cache[require.resolve('../js/settings-store.js')];
+  const reopened = require('../js/settings-store.js');
+  assert.deepEqual(reopened.loadCatalog('opencode', 'http://127.0.0.1:4097'), ['p/a', 'p/b']);
+  assert.deepEqual(reopened.loadCatalog('ollama', 'http://127.0.0.1:4097'), []);
+  assert.deepEqual(reopened.loadCatalog('opencode', 'http://127.0.0.1:4555'), []);
+  assert.equal(reopened.get().model, 'p/b');
+  assert.ok(!global.localStorage.data[store.KEY].includes('secret'));
+  reopened.saveCatalog('openai', 'https://external.example/v1', ['m1']);
+  assert.ok(!global.localStorage.data[store.KEY].includes('external.example'));
+});

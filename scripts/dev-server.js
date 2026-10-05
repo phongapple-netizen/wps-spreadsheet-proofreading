@@ -26,14 +26,15 @@ function readPort(args) {
   return Number.isInteger(value) && value > 0 && value < 65536 ? value : 3892;
 }
 function resolvePublishPaths(platform = process.platform, env = process.env, home = os.homedir()) {
-  if (platform === 'win32') return [path.join(env.APPDATA || path.join(home, 'AppData', 'Roaming'), 'kingsoft', 'wps', 'jsaddons', 'publish.xml')];
+  const platformPath = platform === 'win32' ? path.win32 : path.posix;
+  if (platform === 'win32') return [platformPath.join(env.APPDATA || platformPath.join(home, 'AppData', 'Roaming'), 'kingsoft', 'wps', 'jsaddons', 'publish.xml')];
   if (platform === 'darwin') return [
-    path.join(home, 'Library', 'Containers', 'com.kingsoft.wpsoffice.mac', 'Data', '.kingsoft', 'wps', 'jsaddons', 'publish.xml'),
-    path.join(home, 'Library', 'Containers', 'com.kingsoft.wpsoffice.mac.global', 'Data', '.kingsoft', 'wps', 'jsaddons', 'publish.xml'),
-    path.join(home, 'Library', 'Application Support', 'Kingsoft', 'WPS', 'jsaddons', 'publish.xml'),
-    path.join(home, 'Library', 'Application Support', 'Kingsoft', 'wps', 'jsaddons', 'publish.xml')
+    platformPath.join(home, 'Library', 'Containers', 'com.kingsoft.wpsoffice.mac', 'Data', '.kingsoft', 'wps', 'jsaddons', 'publish.xml'),
+    platformPath.join(home, 'Library', 'Containers', 'com.kingsoft.wpsoffice.mac.global', 'Data', '.kingsoft', 'wps', 'jsaddons', 'publish.xml'),
+    platformPath.join(home, 'Library', 'Application Support', 'Kingsoft', 'WPS', 'jsaddons', 'publish.xml'),
+    platformPath.join(home, 'Library', 'Application Support', 'Kingsoft', 'wps', 'jsaddons', 'publish.xml')
   ];
-  return [path.join(home, '.local', 'share', 'Kingsoft', 'wps', 'jsaddons', 'publish.xml')];
+  return [platformPath.join(home, '.local', 'share', 'Kingsoft', 'wps', 'jsaddons', 'publish.xml')];
 }
 function registerEtAddon(options = {}) {
   const fileSystem = options.fs || fs;

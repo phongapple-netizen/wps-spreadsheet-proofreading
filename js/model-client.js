@@ -88,8 +88,11 @@
 
   function collectTextParts(response) {
     var parts = response && response.parts ? response.parts : [];
+    if (parts.some(function (part) { return part && part.type === "tool"; })) {
+      throw new Error("OpenCode 尝试调用工具，本次校对已中止");
+    }
     return parts.map(function (part) {
-      if (!part) return "";
+      if (!part || part.type !== "text") return "";
       if (typeof part.text === "string") return part.text;
       if (part.type === "text" && typeof part.content === "string") return part.content;
       return "";
@@ -160,6 +163,9 @@
       // Ensure an early watcher rejection is observed even if model response wins.
       watcher.catch(function () {});
 
+      // Keep OpenCode's standard tool definitions, as the Word client does.
+      // The session requires approval for every tool; this client never approves
+      // actions and aborts on approval requests or returned tool parts.
       var payload = {
         agent: "build", model: modelRef(model),
         system: "你只负责校对用户提供的表格文本。不要调用任何工具，不要读取或修改本机文件。只返回要求的 JSON。",
@@ -169,7 +175,13 @@
         method: "POST", headers: headers, body: JSON.stringify(payload), signal: signal
       }, { timeoutMs: options.timeoutMs || REQUEST_TIMEOUT_MS, signal: signal, operation: "请求 OpenCode 模型" });
       var response = await Promise.race([messagePromise, watcher]);
-      if (response && response.info && response.info.error) throw new Error("OpenCode 模型调用失败，请检查模型和认证设置");
+      if (response && response.info && response.info.error) {
+        var modelError = response.info.error;
+        var status = modelError.data && modelError.data.statusCode;
+        if (status === 402) throw new Error("OpenCode 模型服务余额不足（HTTP 402），请更换模型服务或充值");
+        if (status === 403) throw new Error("OpenCode 模型服务拒绝访问（HTTP 403），请检查服务权限或免费模型使用限制");
+        throw new Error("OpenCode 模型调用失败，请检查模型和认证设置");
+      }
       var text = collectTextParts(response);
       if (!text) throw new Error("OpenCode 返回为空");
       succeeded = true;
@@ -281,7 +293,8 @@
       return { models: compatibleModels, defaultModel: compatibleModels[0] || "", detail: "OpenAI 兼容接口" };
     }
     var opencodeHeaders = Object.assign({ "Content-Type": "application/json" }, authHeaders(options.password));
-    data = await jsonFetch(endpoint + "/provider", { method: "GET", headers: opencodeHeaders }, {
+    // Match the Word client: configured providers, rather than the full public catalog.
+    data = await jsonFetch(endpoint + "/config/providers", { method: "GET", headers: opencodeHeaders }, {
       timeoutMs: options.timeoutMs || HEALTH_TIMEOUT_MS, signal: options.signal, operation: "读取 OpenCode 模型列表"
     });
     var all = data && (data.all || data.providers) || [];
