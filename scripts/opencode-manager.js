@@ -82,7 +82,7 @@ async function start(testDeps) {
     try {
       const executable = (testDeps && testDeps.resolveExecutable || resolveExecutable)();
       const origins = Array.from(new Set([corsOrigin, 'http://127.0.0.1:3891', CORS_ORIGIN]));
-      ownedChild = spawnProcess(executable, ['serve', '--pure', '--hostname', HOST, '--port', String(PORT), ...origins.flatMap(origin => ['--cors', origin])], {
+      ownedChild = spawnProcess(executable, ['serve', '--hostname', HOST, '--port', String(PORT), ...origins.flatMap(origin => ['--cors', origin])], {
         cwd: PROJECT_ROOT,
         shell: false,
         windowsHide: true,

@@ -112,3 +112,31 @@ test('oversized messages and invalid permission responses fail closed', async()=
   const broken=createHandler({upstream:async()=>({status:200,data:{permissions:[]}})});
   assert.equal((await request(broken,'GET','/permission')).status,502);
 });
+
+test('DELETE 404/410 clears stale ownership while upstream failures preserve it', async()=> {
+  for (const status of [200,204,404,410,401,500]) {
+    const calls=[];
+    const handler=createHandler({upstream:async(path,method)=>{
+      calls.push([path,method]);
+      return method==='POST' ? {status:200,data:{id:'stale',permission:ask}} : {status,data:{error:'upstream'}};
+    }});
+    await request(handler,'POST','/session',{});
+    assert.equal((await request(handler,'DELETE','/session/stale')).status,status);
+    const gone=status===200||status===204||status===404||status===410;
+    assert.equal((await request(handler,'DELETE','/session/stale')).status,gone?403:status);
+    assert.equal(calls.length,gone?2:3);
+  }
+});
+test('failed permission-gate cleanup also clears ownership on 404/410', async()=> {
+  for (const status of [404,410]) {
+    const calls=[];
+    const handler=createHandler({upstream:async(path,method)=>{
+      calls.push([path,method]);
+      if(path==='/session')return {status:200,data:{id:'bad',permission:[]}};
+      return {status:method==='DELETE'?status:200,data:true};
+    }});
+    assert.equal((await request(handler,'POST','/session',{})).status,502);
+    assert.equal((await request(handler,'DELETE','/session/bad')).status,403);
+    assert.equal(calls.length,3);
+  }
+});

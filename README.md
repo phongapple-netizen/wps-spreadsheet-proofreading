@@ -43,7 +43,7 @@ npm run debug:server
 OpenCode 新配置默认使用 **http://127.0.0.1:4096**，可复用文字版已经启动的服务。任务窗格经本机 3892 同源代理连接，不要求旧文字版增加 CORS 来源。先在本机安装并配置 `opencode`，再点击“检测并读取模型”；服务不存在时调试服务启动 4096，不负责安装或登录。也可以手工启动：
 
 ```bash
-opencode serve --pure --hostname 127.0.0.1 --port 4096 --cors http://127.0.0.1:3891 --cors http://127.0.0.1:3892
+opencode serve --hostname 127.0.0.1 --port 4096 --cors http://127.0.0.1:3891 --cors http://127.0.0.1:3892
 ```
 
 OpenCode 模型填写 `provider/model`。Ollama 默认 `http://127.0.0.1:11434`，需自行启动并下载模型；OpenAI 兼容接口需填写地址、模型和可选 API Key。

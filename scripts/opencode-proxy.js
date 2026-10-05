@@ -4,6 +4,7 @@ const http = require('node:http');
 const crypto = require('node:crypto');
 const LIMIT = 2 * 1024 * 1024;
 const ASK = [{ permission: '*', pattern: '*', action: 'ask' }];
+function sessionGone(status) { return status >= 200 && status < 300 || status === 404 || status === 410; }
 
 // No arbitrary destination, redirects, tool approval, file API or global mutation.
 function upstream(path, method, body, authorization, timeout = 125000) {
@@ -108,7 +109,7 @@ function createProxy(call = upstream) {
         if (disconnected || !Array.isArray(rule) || rule.length !== 1 || rule[0]?.permission !== '*' || rule[0]?.pattern !== '*' || rule[0]?.action !== 'ask') {
           await call('/session/' + session.id + '/abort', 'POST', {}, authorization, 2000).catch(() => {});
           const cleanup = await call('/session/' + session.id, 'DELETE', null, authorization, 2000).catch(() => null);
-          if (cleanup && cleanup.status < 300) sessions.delete(session.id);
+          if (cleanup && sessionGone(cleanup.status)) sessions.delete(session.id);
           throw new Error(disconnected ? 'Panel disconnected' : 'OpenCode did not enforce tool approval');
         }
       }
@@ -116,7 +117,7 @@ function createProxy(call = upstream) {
         if (!Array.isArray(result.data)) throw new Error('Invalid permission response');
         result.data = result.data.filter(p => p && sessions.get(p.sessionID)?.identity === identity);
       }
-      if (ownAction && req.method === 'DELETE' && result.status >= 200 && result.status < 300) sessions.delete(id);
+      if (ownAction && req.method === 'DELETE' && sessionGone(result.status)) sessions.delete(id);
       send(res, result.status, JSON.stringify(result.data));
     } catch (error) {
       send(res, 502, JSON.stringify({ error: error.message }));

@@ -19,7 +19,8 @@ test('OpenCode starts with fixed loopback binding, port, CORS origin, and projec
   });
   assert.deepEqual(result,{ok:true,started:true});
   assert.equal(command,'opencode');
-  assert.deepEqual(args,['serve','--pure','--hostname','127.0.0.1','--port','4096','--cors','http://127.0.0.1:3892','--cors','http://127.0.0.1:3891']);
+  assert.deepEqual(args,['serve','--hostname','127.0.0.1','--port','4096','--cors','http://127.0.0.1:3892','--cors','http://127.0.0.1:3891']);
+  assert.ok(!args.includes('--pure'), 'shared startup mode must match the existing Word launcher');
   assert.equal(options.shell,false);
   assert.equal(options.cwd,manager.PROJECT_ROOT);
 });
