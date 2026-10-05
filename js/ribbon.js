@@ -22,6 +22,17 @@
 
   function joinUrl(base, path) { return String(base || "").replace(/\/$/, "") + path; }
 
+  function taskPaneUrl() {
+    try {
+      if (typeof root.GetUrlPath === "function") {
+        var base = root.GetUrlPath();
+        if (base) return joinUrl(base, TASK_PANE_PATH);
+      }
+    } catch (error) { /* derive the URL from the loaded add-in page */ }
+    try { return new URL("./ui/taskpane.html", root.location.href).href; }
+    catch (error) { return TASK_PANE_PATH; }
+  }
+
   function showPane(pane, visible) {
     if (!pane) return false;
     try {
@@ -38,7 +49,7 @@
     var id = storageGet(STORAGE_KEY) || cachedId;
     var pane = id && nativeApi.getTaskPane ? nativeApi.getTaskPane(id) : null;
     if (!pane) {
-      pane = nativeApi.createTaskPane(joinUrl(root.GetUrlPath ? root.GetUrlPath() : "", TASK_PANE_PATH));
+      pane = nativeApi.createTaskPane(taskPaneUrl());
       if (!pane) return false;
       id = pane.ID || pane.Id || "";
       if (id) { cachedId = id; storageSet(STORAGE_KEY, id); }

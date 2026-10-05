@@ -57,16 +57,17 @@
   function readCell(cell) {
     if (!cell) return null;
     var value = null;
-    var formula = "";
+    var formula = null;
     var address = "";
     try { value = cell.Value2; } catch (error) { value = null; }
-    try { formula = cell.FormulaR1C1; } catch (error) {
-      try { formula = cell.Formula; } catch (inner) { formula = ""; }
+    try { formula = cell.FormulaR1C1; } catch (error) { /* fallback */ }
+    if (formula == null) {
+      try { formula = cell.Formula; } catch (inner) { formula = null; }
     }
     try { address = cell.Address(false, false); } catch (error) {
       try { address = String(cell.Address || ""); } catch (inner) { address = ""; }
     }
-    return { address: String(address || ""), value: value, formula: formula, cell: cell };
+    return { address: String(address || "").replace(/\$/g, ""), value: value, formula: formula, formulaKnown: formula != null, cell: cell };
   }
 
   function sheetByName(sheetName) {
@@ -77,7 +78,7 @@
   }
 
   function selectAddress(address, sheetName, expectedWorkbookKey) {
-    if (expectedWorkbookKey && getWorkbookKey() !== expectedWorkbookKey) return false;
+    if (!sheetName || !expectedWorkbookKey || getWorkbookKey() !== expectedWorkbookKey) return false;
     var sheet = sheetByName(sheetName);
     if (!sheet || !address) return false;
     try {
@@ -85,29 +86,45 @@
       var range = sheet.Range(address);
       if (range && typeof range.Select === "function") range.Select();
       else if (range && typeof range.Activate === "function") range.Activate();
+      else return false;
       return true;
     } catch (error) {
       return false;
     }
   }
 
-  function writeAddress(address, expected, replacement, sheetName, expectedWorkbookKey) {
-    if (expectedWorkbookKey && getWorkbookKey() !== expectedWorkbookKey) {
+  function readAddress(address, sheetName, expectedWorkbookKey) {
+    if (!sheetName || !expectedWorkbookKey || getWorkbookKey() !== expectedWorkbookKey) return null;
+    var sheet = sheetByName(sheetName);
+    try { return sheet ? readCell(sheet.Range(address)) : null; } catch (error) { return null; }
+  }
+
+  function writeAddress(address, expected, replacement, sheetName, expectedWorkbookKey, options) {
+    if (!sheetName || !expectedWorkbookKey) return { ok: false, reason: "无法确认原工作簿或工作表，请重新校对" };
+    if (getWorkbookKey() !== expectedWorkbookKey) {
       return { ok: false, reason: "当前已切换到其他工作簿，请返回原工作簿后再处理" };
     }
     var sheet = sheetByName(sheetName);
     if (!sheet || !address) return { ok: false, reason: "找不到原工作表" };
     try {
       var range = sheet.Range(address);
-      var current = range.Value2;
-      var formula = range.FormulaR1C1;
+      var info = readCell(range);
+      var current = info && info.value;
+      var formula = info && info.formula;
+      if (!info || !info.formulaKnown) return { ok: false, reason: "无法确认单元格公式状态，请重新校对" };
       if (typeof formula === "string" && formula.trim().charAt(0) === "=") {
         return { ok: false, reason: "公式单元格禁止写入" };
       }
-      if (String(current == null ? "" : current) !== String(expected == null ? "" : expected)) {
+      var currentText = current == null && expected === "" ? "" : current;
+      if (typeof currentText !== "string" || currentText !== expected) {
         return { ok: false, reason: "单元格内容已变化，请重新校对" };
       }
-      range.Value2 = String(replacement == null ? "" : replacement);
+      if (typeof replacement !== "string" || (!replacement.trim() && !(options && options.allowEmpty)) || replacement.trim().charAt(0) === "=") {
+        return { ok: false, reason: "建议必须是有效文本，禁止将文本改为公式" };
+      }
+      range.Value2 = replacement;
+      var written = range.Value2;
+      if ((written == null ? "" : written) !== replacement) return { ok: false, reason: "写回后内容与建议不一致，请检查单元格并重新校对" };
       return { ok: true };
     } catch (error) {
       return { ok: false, reason: "写入失败：" + (error && error.message ? error.message : String(error)) };
@@ -124,6 +141,7 @@
     getTaskPane: getTaskPane,
     createTaskPane: createTaskPane,
     readCell: readCell,
+    readAddress: readAddress,
     selectAddress: selectAddress,
     writeAddress: writeAddress
   };
