@@ -303,13 +303,26 @@
     }
     tick(); root.setInterval(tick, 500);
   }
+  function characterSelectionAddress(address, context) {
+    try {
+      var sheet = contextSheet(context), range = sheet && sheet.Range(address);
+      if (!range) return "";
+      if (range.MergeCells !== true && range.MergeCells !== 1 && range.MergeCells !== -1) return address;
+      var area = range.MergeArea;
+      if (!area || normalizeAddress(area.Cells.Item(1, 1).Address(false, false)) !== address) return "";
+      var parts = String(area.Address(false, false)).toUpperCase().split(":");
+      if (parts.length !== 2 || !normalizeAddress(parts[0]) || !normalizeAddress(parts[1])) return "";
+      return normalizeAddress(parts[0]) + ":" + normalizeAddress(parts[1]);
+    } catch (error) { return ""; }
+  }
   function characterTargetActive(session) {
     try {
       var app = getApplication();
       return !!contextSheet(session.context) &&
         sameNativeSheet(session.context.sheet.Range("A1"), getActiveSheet()) &&
         normalizeAddress(app.ActiveCell.Address(false, false)) === session.address &&
-        normalizeAddress(app.Selection.Address(false, false)) === session.address;
+        characterSelectionAddress(session.address, session.context) === session.selectionAddress &&
+        String(app.Selection.Address(false, false)).toUpperCase().replace(/\$/g, "") === session.selectionAddress;
     } catch (error) { return false; }
   }
   function hasCharacterLocation() {
@@ -382,7 +395,9 @@
           app.EditDirectlyInCell !== true || !storage ||
           Date.now() - Number(storage.getItem(CHARACTER_WATCH) || 0) > 2500 ||
           storage.getItem(CHARACTER_RESTORE)) return fallback;
-      var session = { address: normalizeAddress(address), context: context }, token = ++characterSequence;
+      var selectionAddress = characterSelectionAddress(normalizeAddress(address), context);
+      if (!selectionAddress) return fallback;
+      var session = { address: normalizeAddress(address), selectionAddress: selectionAddress, context: context }, token = ++characterSequence;
       // Retain the original-setting recovery flag across an abrupt ET exit.
       // If durable storage is unavailable, do not change the application setting.
       if (!root.localStorage) return fallback;

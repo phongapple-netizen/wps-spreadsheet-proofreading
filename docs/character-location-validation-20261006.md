@@ -54,7 +54,17 @@ Ctrl+Z 能恢复修正前内容、面板同步恢复待处理状态。不过结�
 
 临时诊断控件已移除，正式面板已重新加载；确认 `EditDirectlyInCell` 恢复为 true，恢复标记为空。没有保存测试工作簿，也没有修改文字版仓库。
 
-## 官方资料
+## 合并单元格兼容补充
+
+用户反馈普通单元格成功而合并单元格失败。代码检查发现：`characterTargetActive` 将 Selection 地址按单格解析；B6:C6 被解析为空，因此延迟选中文字和结束编辑均被拦截。
+
+现仅允许 Selection 恰好等于目标单元格的 MergeArea，且目标必须是合并区域的左上角文字单元格；ActiveCell、原工作簿和原生工作表核验继续保留。合并区域改变、选区扩大或合并身份无法核实时，不向原生编辑器发送延迟按键。安全写回仍只操作原单元格地址。
+
+新增自动测试：合并区域内精确定位与安全写回、扩大选区/改变合并结构拒绝导航、无法核实左上角时降级。完整测试 156 项通过。合并单元格真机：未实测；原测试工作簿窗口已关闭，目前打开的是业务表，未对其执行测试修改。
+
+验收：在测试表合并 B6:C6，B6 写入 `第1条检查，，内容。。`；本地规则生成两条问题，连续点击两卡，再分别修正，检查蓝底/黑底选中文字、原值保护及 Ctrl+Z。纵向合并 B6:B7 也需验证。重新打开 WPS 后加载最新代码。
+
+## 官方资料（参考）
 
 - [Application 属性](https://open.wps.cn/documents/app-integration-dev/wps365/client/wpsoffice/jsapi/et/Application/obj)
 - [SendKeys](https://open.wps.cn/documents/app-integration-dev/wps365/client/wpsoffice/jsapi/et/Application/member/SendKeys)

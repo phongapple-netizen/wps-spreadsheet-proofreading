@@ -74,6 +74,49 @@ test('selects an exact punctuation offset and restores only after editing ends',
   assert.equal(h.api.hasCharacterLocation(), false);
 });
 
+function mergeTarget(h) {
+  const area = { Address: () => '$B$6:$C$6', Cells: { Item: () => h.ranges.B6 } };
+  h.ranges.B6.MergeCells = true;
+  h.ranges.B6.MergeArea = area;
+  h.ranges.B6.Select = () => { h.app.ActiveCell = h.ranges.B6; h.app.Selection = area; };
+  return area;
+}
+
+test('merged anchor accepts exactly its full merge selection and finishes before safe writing', async () => {
+  const h = host(); h.watch(); mergeTarget(h);
+  const original = h.ranges.B6.Value2;
+  assert.equal(h.api.selectCharacters('B6', original, 9, 11, h.context).precise, true);
+  h.advance(300);
+  assert.deepEqual(h.keys, ['{F2}', '^{HOME}{RIGHT 9}+{RIGHT 2}']);
+  const pending = h.api.finishCharacterLocation(); h.advance(700);
+  assert.equal((await pending).ok, true);
+  assert.equal(h.api.writeAddress('B6', original, '已修正', h.context).ok, true);
+  assert.equal(h.ranges.B6.Value2, '已修正');
+  assert.equal(h.ranges.C6.Value2, '其他文本');
+});
+
+test('a larger selection or changed merge area cannot receive delayed character navigation', async () => {
+  for (const change of [
+    h => { h.app.Selection = { Address: () => 'B6:D6' }; },
+    h => { h.ranges.B6.MergeArea = { Address: () => 'B6:D6', Cells: { Item: () => h.ranges.B6 } }; }
+  ]) {
+    const h = host(); h.watch(); mergeTarget(h);
+    h.api.selectCharacters('B6', h.ranges.B6.Value2, 9, 11, h.context);
+    change(h); h.advance(300);
+    assert.deepEqual(h.keys, ['{F2}']);
+    assert.equal((await h.api.finishCharacterLocation()).ok, false);
+    assert.deepEqual(h.keys, ['{F2}']);
+  }
+});
+
+test('unverifiable merge anchor falls back without entering the editor', () => {
+  const h = host(); h.watch(); const area = mergeTarget(h);
+  area.Cells.Item = () => h.ranges.C6;
+  assert.equal(h.api.selectCharacters('B6', h.ranges.B6.Value2, 9, 11, h.context).precise, false);
+  assert.deepEqual(h.keys, []);
+  assert.equal(h.app.EditDirectlyInCell, true);
+});
+
 test('card re-render happens before queued Enter reactivates the native editor', async () => {
   const h=host(); h.watch(); h.queueKeys();
   h.api.selectCharacters('B6',h.ranges.B6.Value2,9,11,h.context); h.advance(300);
