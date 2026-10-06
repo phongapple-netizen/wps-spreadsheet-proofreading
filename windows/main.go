@@ -512,28 +512,28 @@ func runRegistry(set bool) error {
 // installSteps keeps the externally visible install order explicit and lets
 // tests exercise rollback without touching the real registry or starting a
 // Windows service process.
-func installSteps(registerStep func() error, startStep func() (func() error, error), healthStep func() error, runStep func() error, rollback func(func() error) error) error {
-	if err := registerStep(); err != nil {
-		if rbErr := rollback(nil); rbErr != nil {
-			return fmt.Errorf("注册 WPS 加载项失败，且回滚失败: %v; %w", rbErr, err)
-		}
-		return fmt.Errorf("注册 WPS 加载项失败，已回滚: %w", err)
-	}
+func installSteps(registerStep func() error, startStep func() (func() error, error), healthStep func() error, runStep func() error, rollback func(func() error, bool) error) error {
 	stop, err := startStep()
 	if err != nil {
-		if rbErr := rollback(nil); rbErr != nil {
+		if rbErr := rollback(nil, false); rbErr != nil {
 			return fmt.Errorf("本地服务启动失败，且回滚失败: %v; %w", rbErr, err)
 		}
 		return fmt.Errorf("本地服务启动失败，已回滚: %w", err)
 	}
 	if err := healthStep(); err != nil {
-		if rbErr := rollback(stop); rbErr != nil {
+		if rbErr := rollback(stop, false); rbErr != nil {
 			return fmt.Errorf("本地服务健康检查失败，且回滚失败: %v; %w", rbErr, err)
 		}
 		return fmt.Errorf("本地服务健康检查失败，已回滚: %w", err)
 	}
+	if err := registerStep(); err != nil {
+		if rbErr := rollback(stop, false); rbErr != nil {
+			return fmt.Errorf("注册 WPS 加载项失败，且回滚失败: %v; %w", rbErr, err)
+		}
+		return fmt.Errorf("注册 WPS 加载项失败，已回滚: %w", err)
+	}
 	if err := runStep(); err != nil {
-		if rbErr := rollback(stop); rbErr != nil {
+		if rbErr := rollback(stop, true); rbErr != nil {
 			return fmt.Errorf("写入自启动项失败，且回滚失败: %v; %w", rbErr, err)
 		}
 		return fmt.Errorf("写入自启动项失败，已回滚: %w", err)
@@ -542,6 +542,9 @@ func installSteps(registerStep func() error, startStep func() (func() error, err
 }
 
 func install() error {
+	if err := requireWPSClosed(); err != nil {
+		return err
+	}
 	if !portAvailable() {
 		return errors.New("端口 3892 已被占用，未写入 WPS 注册项")
 	}
@@ -581,39 +584,41 @@ func install() error {
 	if err != nil {
 		return err
 	}
-	rollback := func(stop func() error) error {
+	rollback := func(stop func() error, registrationCompleted bool) error {
 		var failures []string
-		currentXML, e := os.ReadFile(filename)
-		if e == nil {
-			if string(currentXML) == expectedXML {
-				if hadFile {
-					e = atomicWrite(filename, original, originalMode)
+		if registrationCompleted {
+			currentXML, e := os.ReadFile(filename)
+			if e == nil {
+				if string(currentXML) == expectedXML {
+					if hadFile {
+						e = atomicWrite(filename, original, originalMode)
+					} else {
+						e = os.Remove(filename)
+						if errors.Is(e, os.ErrNotExist) {
+							e = nil
+						}
+					}
 				} else {
-					e = os.Remove(filename)
-					if errors.Is(e, os.ErrNotExist) {
-						e = nil
+					// Preserve concurrent changes by removing only this add-on's entry.
+					var cleaned string
+					cleaned, e = updateXML(string(currentXML), false)
+					if e == nil && cleaned != string(currentXML) {
+						info, statErr := os.Stat(filename)
+						mode := os.FileMode(0o600)
+						if statErr == nil {
+							mode = info.Mode().Perm()
+						}
+						e = atomicWrite(filename, []byte(cleaned), mode)
 					}
 				}
-			} else {
-				// Preserve concurrent changes by removing only this add-on's entry.
-				var cleaned string
-				cleaned, e = updateXML(string(currentXML), false)
-				if e == nil && cleaned != string(currentXML) {
-					info, statErr := os.Stat(filename)
-					mode := os.FileMode(0o600)
-					if statErr == nil {
-						mode = info.Mode().Perm()
-					}
-					e = atomicWrite(filename, []byte(cleaned), mode)
+				if e != nil {
+					failures = append(failures, "恢复本插件 publish.xml 注册状态失败: "+e.Error())
 				}
+			} else if !errors.Is(e, os.ErrNotExist) {
+				failures = append(failures, "读取 publish.xml 以执行回滚失败: "+e.Error())
+			} else if !hadFile {
+				_ = os.Remove(filepath.Dir(filename))
 			}
-			if e != nil {
-				failures = append(failures, "恢复本插件 publish.xml 注册状态失败: "+e.Error())
-			}
-		} else if !errors.Is(e, os.ErrNotExist) {
-			failures = append(failures, "读取 publish.xml 以执行回滚失败: "+e.Error())
-		} else if !hadFile {
-			_ = os.Remove(filepath.Dir(filename))
 		}
 		targetRun := stringRunValue(`"` + executable + `" --serve`)
 		currentRun, runErr := readRunValue()
@@ -681,7 +686,12 @@ func install() error {
 	runStep := func() error {
 		return writeRunValue(stringRunValue(`"` + executable + `" --serve`))
 	}
-	return installSteps(func() error { return register(true) }, startStep, healthStep, runStep, rollback)
+	return installSteps(func() error {
+		if err := requireWPSClosed(); err != nil {
+			return err
+		}
+		return register(true)
+	}, startStep, healthStep, runStep, rollback)
 }
 
 func uninstall() error {
