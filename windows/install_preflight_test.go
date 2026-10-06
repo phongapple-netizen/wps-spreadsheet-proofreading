@@ -2,6 +2,8 @@ package main
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 )
@@ -36,7 +38,10 @@ func TestInstallReadinessOrderAndRollback(t *testing.T) {
 					return nil, err
 				}
 				return func() error { return step("stop") }, nil
-			}, func() error { return step("health") }, func() error { return step("run") }, func(stop func() error) error {
+			}, func() error { return step("health") }, func() error { return step("run") }, func(stop func() error, registrationCompleted bool) error {
+				if registrationCompleted != (fail == "run") {
+					t.Fatalf("incorrect registration completion state: %v", registrationCompleted)
+				}
 				calls = append(calls, "rollback")
 				if stop != nil {
 					return stop()
@@ -66,7 +71,10 @@ func TestInstallReadinessOrderAndRollback(t *testing.T) {
 func TestInstallRegistrationFailureReportsRollbackFailure(t *testing.T) {
 	err := installSteps(func() error { return errors.New("registration") }, func() (func() error, error) {
 		return func() error { return nil }, nil
-	}, func() error { return nil }, func() error { t.Fatal("must not write Run after registration failure"); return nil }, func(stop func() error) error {
+	}, func() error { return nil }, func() error { t.Fatal("must not write Run after registration failure"); return nil }, func(stop func() error, registrationCompleted bool) error {
+		if registrationCompleted {
+			t.Fatal("failed registration must not be completed")
+		}
 		if stop == nil {
 			t.Fatal("must retain service cleanup handle")
 		}
@@ -74,5 +82,69 @@ func TestInstallRegistrationFailureReportsRollbackFailure(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("must report failed install")
+	}
+}
+
+func TestFailedUpgradeRegistrationPreservesExistingPlugin(t *testing.T) {
+	for _, failure := range []string{"backup", "replace"} {
+		t.Run(failure, func(t *testing.T) {
+			t.Setenv("APPDATA", t.TempDir())
+			filename, err := publishPath()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(filepath.Dir(filename), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			original := `<?xml version="1.0"?><jsplugins><jspluginonline name="wps-spreadsheet-proofreading" type="et" url="http://127.0.0.1:3892/" debug="old"/><jspluginonline name="wps-text-proofreading" type="wps"/><jspluginonline name="other-addon"/></jsplugins>`
+			if err := os.WriteFile(filename, []byte(original), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if failure == "backup" {
+				// A directory at the backup destination forces a real backup error.
+				if err := os.Mkdir(filename+".wps-spreadsheet-proofreading.bak", 0o700); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				// Windows does not grant delete sharing to os.Open. Holding the
+				// old file open permits reads/backup but prevents its replacement.
+				locked, err := os.Open(filename)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer locked.Close()
+			}
+			stopped, runCalled := false, false
+			oldRun := stringRunValue(`"C:\Existing\WPSSpreadsheetProofreadingServer.exe" --serve`)
+			currentRun := oldRun
+			err = installSteps(func() error { return register(true) }, func() (func() error, error) {
+				return func() error { stopped = true; return nil }, nil
+			}, func() error { return nil }, func() error {
+				runCalled = true
+				currentRun = stringRunValue("new service")
+				return nil
+			}, func(stop func() error, registrationCompleted bool) error {
+				if registrationCompleted {
+					t.Error("failed registration must not trigger publish.xml cleanup")
+					if err := register(false); err != nil {
+						t.Error(err)
+					}
+				}
+				if stop == nil {
+					t.Fatal("missing service cleanup")
+				}
+				return stop()
+			})
+			if err == nil {
+				t.Fatal("expected real registration failure")
+			}
+			data, readErr := os.ReadFile(filename)
+			if readErr != nil || string(data) != original {
+				t.Fatalf("old plugin registration changed: %s err=%v", data, readErr)
+			}
+			if !stopped || runCalled || currentRun != oldRun {
+				t.Fatalf("stopped=%v runCalled=%v RunChanged=%v", stopped, runCalled, currentRun != oldRun)
+			}
+		})
 	}
 }

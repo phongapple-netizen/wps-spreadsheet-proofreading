@@ -512,28 +512,28 @@ func runRegistry(set bool) error {
 // installSteps keeps the externally visible install order explicit and lets
 // tests exercise rollback without touching the real registry or starting a
 // Windows service process.
-func installSteps(registerStep func() error, startStep func() (func() error, error), healthStep func() error, runStep func() error, rollback func(func() error) error) error {
+func installSteps(registerStep func() error, startStep func() (func() error, error), healthStep func() error, runStep func() error, rollback func(func() error, bool) error) error {
 	stop, err := startStep()
 	if err != nil {
-		if rbErr := rollback(nil); rbErr != nil {
+		if rbErr := rollback(nil, false); rbErr != nil {
 			return fmt.Errorf("本地服务启动失败，且回滚失败: %v; %w", rbErr, err)
 		}
 		return fmt.Errorf("本地服务启动失败，已回滚: %w", err)
 	}
 	if err := healthStep(); err != nil {
-		if rbErr := rollback(stop); rbErr != nil {
+		if rbErr := rollback(stop, false); rbErr != nil {
 			return fmt.Errorf("本地服务健康检查失败，且回滚失败: %v; %w", rbErr, err)
 		}
 		return fmt.Errorf("本地服务健康检查失败，已回滚: %w", err)
 	}
 	if err := registerStep(); err != nil {
-		if rbErr := rollback(stop); rbErr != nil {
+		if rbErr := rollback(stop, false); rbErr != nil {
 			return fmt.Errorf("注册 WPS 加载项失败，且回滚失败: %v; %w", rbErr, err)
 		}
 		return fmt.Errorf("注册 WPS 加载项失败，已回滚: %w", err)
 	}
 	if err := runStep(); err != nil {
-		if rbErr := rollback(stop); rbErr != nil {
+		if rbErr := rollback(stop, true); rbErr != nil {
 			return fmt.Errorf("写入自启动项失败，且回滚失败: %v; %w", rbErr, err)
 		}
 		return fmt.Errorf("写入自启动项失败，已回滚: %w", err)
@@ -584,10 +584,9 @@ func install() error {
 	if err != nil {
 		return err
 	}
-	registrationAttempted := false
-	rollback := func(stop func() error) error {
+	rollback := func(stop func() error, registrationCompleted bool) error {
 		var failures []string
-		if registrationAttempted {
+		if registrationCompleted {
 			currentXML, e := os.ReadFile(filename)
 			if e == nil {
 				if string(currentXML) == expectedXML {
@@ -691,7 +690,6 @@ func install() error {
 		if err := requireWPSClosed(); err != nil {
 			return err
 		}
-		registrationAttempted = true
 		return register(true)
 	}, startStep, healthStep, runStep, rollback)
 }
