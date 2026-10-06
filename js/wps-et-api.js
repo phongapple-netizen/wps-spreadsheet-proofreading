@@ -266,6 +266,209 @@
     }
   }
 
+  var CHARACTER_RESTORE = "wps_et_character_location_restore";
+  var CHARACTER_WATCH = "wps_et_character_location_watch";
+  var RETURN_RESTORE = "wps_et_move_after_return_restore";
+  var characterSession = null, characterSequence = 0, characterFinish = null;
+  function characterStorage() {
+    try {
+      var storage = getPluginStorage();
+      return storage && storage.getItem && storage.setItem ? storage : null;
+    } catch (error) { return null; }
+  }
+  function restoreCharacterSetting() {
+    var storage = characterStorage();
+    var durablePending = false;
+    try { durablePending = root.localStorage.getItem(CHARACTER_RESTORE) === "true"; } catch (error) { /* optional recovery */ }
+    if (!storage || (storage.getItem(CHARACTER_RESTORE) !== "true" && !durablePending)) return;
+    if (Date.now() - Number(storage.getItem(CHARACTER_RESTORE + "_since") || 0) < 600) return;
+    var app = getApplication();
+    // ET rejects this assignment while its editor is open. Retry after the
+    // user commits/cancels editing; never use Escape to discard their input.
+    app.EditDirectlyInCell = true;
+    if (app.EditDirectlyInCell === true) {
+      storage.setItem(CHARACTER_RESTORE, "");
+      try { root.localStorage.removeItem(CHARACTER_RESTORE); } catch (error) { /* retry on next tick */ }
+    }
+  }
+  function startCharacterRestoreWatch() {
+    if (root.__wpsEtCharacterWatch || typeof root.setInterval !== "function") return;
+    root.__wpsEtCharacterWatch = true;
+    function tick() {
+      try {
+        var storage = characterStorage();
+        if (!storage) return;
+        storage.setItem(CHARACTER_WATCH, String(Date.now()));
+        restoreCharacterSetting();
+        restoreReturnSetting(false);
+      } catch (error) { /* retry when ET leaves edit mode */ }
+    }
+    tick(); root.setInterval(tick, 500);
+  }
+  function restoreReturnSetting(immediate, expected) {
+    try {
+      var saved = root.localStorage && root.localStorage.getItem(RETURN_RESTORE);
+      if (!saved) return;
+      if (expected && saved !== expected) return;
+      var state = JSON.parse(saved);
+      if (typeof state.value !== "boolean" || !Number.isFinite(state.time)) return;
+      if (!immediate) {
+        var storage = characterStorage();
+        if (storage && storage.getItem(CHARACTER_RESTORE) === "true") return;
+        if (getApplication().EditDirectlyInCell !== true && Date.now() - state.time < 3000) return;
+      }
+      var app = getApplication();
+      app.MoveAfterReturn = state.value;
+      if (app.MoveAfterReturn === state.value) root.localStorage.removeItem(RETURN_RESTORE);
+    } catch (error) { /* background watcher retries restoration */ }
+  }
+  function suppressReturnMovement(app) {
+    var saved;
+    try {
+      // Keep the user's global preference recoverable if the pane closes.
+      // Unsupported hosts retain the existing Enter/reselect behavior.
+      if (!root.localStorage || typeof app.MoveAfterReturn !== "boolean") return;
+      restoreReturnSetting(false);
+      if (root.localStorage.getItem(RETURN_RESTORE)) return;
+      saved = JSON.stringify({ value: app.MoveAfterReturn, time: Date.now() });
+      root.localStorage.setItem(RETURN_RESTORE, saved);
+      if (root.localStorage.getItem(RETURN_RESTORE) !== saved) return;
+      app.MoveAfterReturn = false;
+      if (app.MoveAfterReturn !== false) { restoreReturnSetting(true, saved); return; }
+      return saved;
+    } catch (error) { if (saved) restoreReturnSetting(true, saved); }
+  }
+  function characterSelectionAddress(address, context) {
+    try {
+      var sheet = contextSheet(context), range = sheet && sheet.Range(address);
+      if (!range) return "";
+      if (range.MergeCells !== true && range.MergeCells !== 1 && range.MergeCells !== -1) return address;
+      var area = range.MergeArea;
+      if (!area || normalizeAddress(area.Cells.Item(1, 1).Address(false, false)) !== address) return "";
+      var parts = String(area.Address(false, false)).toUpperCase().split(":");
+      if (parts.length !== 2 || !normalizeAddress(parts[0]) || !normalizeAddress(parts[1])) return "";
+      return normalizeAddress(parts[0]) + ":" + normalizeAddress(parts[1]);
+    } catch (error) { return ""; }
+  }
+  function characterTargetActive(session) {
+    try {
+      var app = getApplication();
+      return !!contextSheet(session.context) &&
+        sameNativeSheet(session.context.sheet.Range("A1"), getActiveSheet()) &&
+        normalizeAddress(app.ActiveCell.Address(false, false)) === session.address &&
+        characterSelectionAddress(session.address, session.context) === session.selectionAddress &&
+        String(app.Selection.Address(false, false)).toUpperCase().replace(/\$/g, "") === session.selectionAddress;
+    } catch (error) { return false; }
+  }
+  function hasCharacterLocation() {
+    if (!characterSession) return false;
+    try {
+      if (getApplication().EditDirectlyInCell === true) {
+        characterSequence++; return false;
+      }
+    } catch (error) { /* retain the guard when the host cannot be inspected */ }
+    return true;
+  }
+  function finishCharacterLocation() {
+    if (characterFinish) return characterFinish;
+    if (!characterSession) return null;
+    var session = characterSession;
+    characterSequence++; // invalidate queued selection keys
+    if (!characterTargetActive(session)) {
+      // The user has already left our editor and selected another cell. Do
+      // not send Enter there. A restored setting alone is not proof that a
+      // newer ET build has closed its editor, so still commit on our target.
+      try {
+        if (getApplication().EditDirectlyInCell === true) { characterSession = null; return null; }
+      } catch (error) { /* fail closed */ }
+      return Promise.resolve({ ok: false, reason: "请先结束单元格编辑，再继续校对或修正。" });
+    }
+    characterFinish = new Promise(function (resolve) {
+      var started = Date.now(), returnSetting = session.returnSetting;
+      function done(result) { if (returnSetting) restoreReturnSetting(true, returnSetting); characterFinish = null; resolve(result); }
+      function check() {
+        try {
+          restoreCharacterSetting();
+          if (getApplication().EditDirectlyInCell === true && contextSheet(session.context)) {
+            characterSession = null;
+            done({ ok: selectAddress(session.address, session.context) }); return;
+          }
+        } catch (error) { /* fail closed */ }
+        if (Date.now() - started < 2500 && contextSheet(session.context)) root.setTimeout(check, 100);
+        else done({ ok: false, reason: "无法确认编辑已结束，请先按 Enter 后再试。" });
+      }
+      // The caller disables/re-renders card controls after this method returns.
+      // Sending Enter before that DOM update can lose the native editor focus.
+      root.setTimeout(function () {
+        if (!characterTargetActive(session)) {
+          done({ ok: false, reason: "目标单元格已切换，请结束编辑后重新选择。" }); return;
+        }
+        try {
+          var app = getApplication();
+          // The background page may have restored movement after a manual
+          // Enter/Escape. A retained session is not proof the editor is open:
+          // re-suppress movement for this guarded commit as well. Do not infer
+          // editor closure from EditDirectlyInCell (some hosts accept it live).
+          returnSetting = suppressReturnMovement(app) || returnSetting;
+          app.ActiveWindow.Activate(); app.SendKeys("{ENTER}", true);
+          root.setTimeout(check, 100);
+        } catch (error) { done({ ok: false, reason: "无法结束单元格编辑，请先按 Enter 后再试。" }); }
+      }, 50);
+    });
+    return characterFinish;
+  }
+  function selectCharacters(address, expected, start, end, context) {
+    var info = readAddress(address, context);
+    if (!info) return { ok: false, reason: "无法定位原单元格，请确认原工作簿和工作表仍然打开" };
+    if (typeof expected !== "string" || !info.formulaKnown || info.hasFormula || info.value !== expected) {
+      return { ok: false, reason: "单元格内容已变化，请重新校对。" };
+    }
+    if (!selectAddress(address, context)) return { ok: false, reason: "无法定位原单元格" };
+    var fallback = { ok: true, precise: false };
+    try {
+      var app = getApplication(), storage = characterStorage();
+      // Keyboard offsets for surrogate pairs, combining marks and CRLF have
+      // not been verified in ET. Locate the cell rather than select wrong text.
+      if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end <= start || end > expected.length ||
+          /[\r\n\t\uD800-\uDFFF\u0300-\u036f]/.test(expected) ||
+          typeof root.setTimeout !== "function" || typeof app.SendKeys !== "function" ||
+          app.EditDirectlyInCell !== true || !storage ||
+          Date.now() - Number(storage.getItem(CHARACTER_WATCH) || 0) > 2500 ||
+          storage.getItem(CHARACTER_RESTORE)) return fallback;
+      var selectionAddress = characterSelectionAddress(normalizeAddress(address), context);
+      if (!selectionAddress) return fallback;
+      var session = { address: normalizeAddress(address), selectionAddress: selectionAddress, context: context }, token = ++characterSequence;
+      // Retain the original-setting recovery flag across an abrupt ET exit.
+      // If durable storage is unavailable, do not change the application setting.
+      if (!root.localStorage) return fallback;
+      root.localStorage.setItem(CHARACTER_RESTORE, "true");
+      if (root.localStorage.getItem(CHARACTER_RESTORE) !== "true") return fallback;
+      storage.setItem(CHARACTER_RESTORE, "true");
+      storage.setItem(CHARACTER_RESTORE + "_since", String(Date.now()));
+      // ET can reject application preference changes once F2 editing starts.
+      // Suppress Enter movement before entering the native formula editor.
+      session.returnSetting = suppressReturnMovement(app);
+      app.EditDirectlyInCell = false;
+      if (app.EditDirectlyInCell !== false) {
+        if (session.returnSetting) restoreReturnSetting(true, session.returnSetting);
+        restoreCharacterSetting(); return fallback;
+      }
+      characterSession = session;
+      app.ActiveWindow.Activate(); app.SendKeys("{F2}", true);
+      root.setTimeout(function () {
+        // Never send delayed navigation into another workbook/cell/editor.
+        if (token !== characterSequence || characterSession !== session || !characterTargetActive(session)) return;
+        try {
+          // F2 has already focused the formula editor. Re-activating the
+          // worksheet here steals that focus and loses the character selection.
+          app.SendKeys("^{HOME}" + (start ? "{RIGHT " + start + "}" : "") + "+{RIGHT " + (end - start) + "}", true);
+        }
+        catch (error) { /* normal Enter/Escape and the background watcher restore the setting */ }
+      }, 300);
+      return { ok: true, precise: true };
+    } catch (error) { return { ok: false, reason: "无法定位文字，请结束单元格编辑后再试。" }; }
+  }
+
   root.WpsSpreadsheet = {
     getApplication: getApplication,
     getSelection: getSelection,
@@ -283,6 +486,10 @@
     readCell: readCell,
     readAddress: readAddress,
     selectAddress: selectAddress,
+    selectCharacters: selectCharacters,
+    finishCharacterLocation: finishCharacterLocation,
+    hasCharacterLocation: hasCharacterLocation,
+    startCharacterRestoreWatch: startCharacterRestoreWatch,
     writeAddress: writeAddress
   };
 })(typeof window !== "undefined" ? window : globalThis);

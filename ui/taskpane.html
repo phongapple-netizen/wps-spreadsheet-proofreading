@@ -97,23 +97,13 @@
             <div id="history-empty" class="empty-state" hidden>本次会话还没有处理记录。</div>
             <div id="proofreading-history" class="history-list" hidden></div>
             </div>
-            <p id="current-workbook" class="field-note">当前工作簿</p>
-            <p id="apply-all-hint" class="field-note">仅内置标点格式规则可一键修正；自定义规则和 AI 建议需逐条确认</p>
             <div class="result-footer">
                 <div class="apply-all-wrap">
                     <button id="apply-all" class="button button-secondary" type="button" title="仅处理低风险格式规则，其他建议需逐条确认" disabled>一键修正（0）</button>
                 </div>
                 <button id="rerun-proofreading" class="button button-secondary" type="button">↻ 重新校对</button>
-                <details id="result-more" class="result-more">
-                    <summary class="result-more-toggle" aria-label="更多结果操作" title="更多">···</summary>
-                    <div class="result-more-menu">
-                        <button id="export-results" class="result-more-item" type="button">导出结果</button>
-                    </div>
-                </details>
             </div>
         </section>
-
-        <span class="footer-info" tabindex="0" aria-label="每次校对先在本地执行已启用规则，再由所选模型分批复核正文（每批约 2500 字）；规则与 AI 结果会自动去重、合并。应用前会再次核对原文，文档已变化时不会写入。" title="每次校对先在本地执行已启用规则，再由所选模型分批复核正文（每批约 2500 字）；规则与 AI 结果会自动去重、合并。应用前会再次核对原文，文档已变化时不会写入。">ⓘ</span>
         </div>
 
         <section id="rewrite-view" class="rewrite-view" hidden aria-labelledby="rewrite-heading">

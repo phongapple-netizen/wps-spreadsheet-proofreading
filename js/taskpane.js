@@ -104,12 +104,10 @@
     text("result-stale-summary", "需重查 " + stale); $("result-stale-summary").hidden = !stale;
     var auto = pending.filter(function (x) { return x.autoFixable && x.actionable !== false && !x.needsReview; }).length;
     $("apply-all").disabled = busy || auto === 0; $("apply-all").textContent = "一键修正（" + auto + "）";
-    text("apply-all-hint", auto ? "可修正 " + auto + " 条内置标点格式建议" : "仅内置标点格式规则可一键修正；自定义规则和 AI 建议需逐条确认");
   }
   root.setSpreadsheetWorkbook = function (state) {
     resolveScopeConfirmation(false);
     activeIssueId = ""; activeMenuId = ""; expandedAnalysisIds.clear(); activeTab = "issues";
-    text("current-workbook", state && state.name ? "当前文件：" + state.name : "当前工作簿");
     $("processed-issues").open = false;
   };
   function isProcessedIssue(item) { return ["applied", "ignored", "reverted"].indexOf(item.status) >= 0; }
@@ -357,7 +355,6 @@
     $("cancel-scope-run").addEventListener("click", cancelScopeRun);
     $("cancel-proofreading").addEventListener("click", cancelProofreading);
     $("apply-all").addEventListener("click", function () { integration().applyAll(); });
-    $("export-results").addEventListener("click", exportResults);
     $("proofreading-issues").addEventListener("click", function (e) {
       var analysisSummary = e.target.closest(".issue-analysis summary");
       if (analysisSummary) {
@@ -441,16 +438,6 @@
     } finally { connectionBusy = false; root.setSpreadsheetConnectionBusy(false); }
   }
   function refreshTiming() { var records = integration().getTimingRecords ? integration().getTimingRecords() : []; $("proofreading-timing-log").value = JSON.stringify(records || [], null, 2); }
-  function exportResults() {
-    var payload = { exportedAt: new Date().toISOString(), issues: issues.map(function (x) { return {
-      sheetName: x.sheetName || "", address: x.address || "", category: x.category || x.type || "", original: x.original || "",
-      suggestion: x.suggestion || "", reason: x.reason || "", status: x.status || "pending"
-    }; }) };
-    var blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json;charset=utf-8" });
-    var url = URL.createObjectURL(blob), anchor = root.document.createElement("a");
-    anchor.href = url; anchor.download = "wps-spreadsheet-proofreading.json"; root.document.body.appendChild(anchor); anchor.click(); anchor.remove();
-    root.setTimeout(function () { URL.revokeObjectURL(url); }, 0);
-  }
   loadSettings(); hydrateProviderProfile(settings); wire(); root.setSpreadsheetIssues([]); root.setSpreadsheetHistory([]);
   if (integration() && integration().startHostTracking) integration().startHostTracking();
 })(typeof window !== "undefined" ? window : globalThis);
