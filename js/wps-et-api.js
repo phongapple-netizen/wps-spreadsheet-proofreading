@@ -405,6 +405,11 @@
         }
         try {
           var app = getApplication();
+          // The background page may have restored movement after a manual
+          // Enter/Escape. A retained session is not proof the editor is open:
+          // re-suppress movement for this guarded commit as well. Do not infer
+          // editor closure from EditDirectlyInCell (some hosts accept it live).
+          returnSetting = suppressReturnMovement(app) || returnSetting;
           app.ActiveWindow.Activate(); app.SendKeys("{ENTER}", true);
           root.setTimeout(check, 100);
         } catch (error) { done({ ok: false, reason: "无法结束单元格编辑，请先按 Enter 后再试。" }); }

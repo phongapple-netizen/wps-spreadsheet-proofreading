@@ -54,7 +54,7 @@ function host(text = '第1条检查，，内容。。') {
     }
     now=deadline;
   }
-  return { api, app, context, keys, storage, ranges, advance, durable, movements,
+  return { root, api, app, context, keys, storage, ranges, advance, durable, movements,
     blur: () => { nativeFocused=false; }, queueKeys: () => { queuedKeys=true; },
     delayEnter: ms => { enterDelay=ms; }, get activations(){return activations;},
     allowSettingWhileEditing: () => { blockSettingInEdit = false; },
@@ -265,4 +265,48 @@ test('a host accepting the setting during editing still commits input before cor
   assert.equal((await pending).ok, true);
   assert.equal(h.ranges.B6.Value2, '用户正在编辑的新内容');
   assert.equal(h.keys.at(-1), '{ENTER}');
+});
+
+test('manual editor exit on the target never reintroduces Enter movement after background restoration', async () => {
+  for (const preference of [true, false]) {
+    const h = host(); h.watch(); h.app.MoveAfterReturn = preference;
+    const original = h.ranges.B6.Value2;
+    h.api.selectCharacters('B6', original, 9, 11, h.context); h.advance(600);
+    h.exit(); h.tick(); // manual Enter/Escape ended editing without leaving B6
+    assert.equal(h.app.EditDirectlyInCell, true);
+    assert.equal(h.app.MoveAfterReturn, preference);
+    assert.equal(h.api.hasCharacterLocation(), false);
+    const pending = h.api.finishCharacterLocation(); h.advance(700);
+    assert.equal((await pending).ok, true);
+    assert.deepEqual(h.movements, []);
+    assert.equal(h.app.MoveAfterReturn, preference);
+    assert.equal(h.api.finishCharacterLocation(), null, 'successful guarded commit clears the retained session');
+    assert.equal(h.api.writeAddress('B6', original, '修正后文本', h.context).ok, true);
+  }
+});
+
+test('manual editor exit then integration correction writes safely without neighboring navigation', async () => {
+  const h = host(); h.watch();
+  const cell = h.ranges.B6;
+  Object.assign(cell, { Rows: { Count: 1 }, Columns: { Count: 1 }, Item: () => cell });
+  Object.assign(h.root, {
+    AbortController,
+    WpsSpreadsheetProofreadingCore: require('../js/proofreading-core.js'),
+    WpsTextProofreadingCore: require('../js/text-proofreading-core.js'),
+    WpsSpreadsheetModelClient: { request: async () => JSON.stringify({ issues: [{ paragraphIndex: 1,
+      category: 'typo', original: cell.Value2, suggestion: '第1条检查，内容。', action: 'replace', confidence: 0.99, needsReview: false }] }) },
+    getSpreadsheetRunOptions: () => ({ autoAdvance: false })
+  });
+  vm.runInNewContext(fs.readFileSync(require.resolve('../js/spreadsheet-integration.js'), 'utf8'), h.root);
+  const integration = h.root.WpsSpreadsheetIntegration;
+  await integration.run(); // deterministic model fixture; no external request
+  const issue = integration.getIssues()[0]; assert.ok(issue);
+  integration.locate(issue.id); h.advance(600);
+  h.exit(); h.tick();
+  const pending = integration.apply(issue.id); h.advance(700); await pending;
+  assert.equal(integration.getHistory().length, 1);
+  assert.equal(integration.getIssues().find(i => i.id === issue.id).status, 'applied');
+  assert.notEqual(cell.Value2, '第1条检查，，内容。。');
+  assert.deepEqual(h.movements, []);
+  assert.equal(h.app.MoveAfterReturn, true);
 });
