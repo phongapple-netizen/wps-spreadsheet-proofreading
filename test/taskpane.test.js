@@ -114,7 +114,8 @@ function makeRuntime(options = {}) {
   const root = {
     document, localStorage, WpsSpreadsheetSettings: settings, WpsSpreadsheetIntegration: integration,
     WpsSpreadsheetModelClient: client, URL, setTimeout(fn) { fn(); },
-    location: { origin: "http://localhost:3892" }
+    location: { origin: "http://localhost:3892" },
+    fetch: options.fetch
   };
   const context = vm.createContext(root);
   vm.runInContext(source, context, { filename: "taskpane.js" });
@@ -453,6 +454,18 @@ test("expanded error analysis survives another card update and the unchanged car
   assert.match(aCard.innerHTML, /<details class="issue-analysis" open>/);
   assert.equal(elements["processed-issues-list"].children[0], aCard);
   assert.equal(elements["pending-issues"].children[0], bCard);
+});
+
+test("version label is loaded from the installed package metadata", async () => {
+  const { elements } = makeRuntime({
+    fetch: async (url, options) => {
+      assert.equal(url, "/package.json");
+      assert.equal(options.cache, "no-store");
+      return { ok: true, async json() { return { version: "9.8.7" }; } };
+    }
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(elements["app-version"].textContent, "WPS 表格校改 · v9.8.7");
 });
 
 test("footer omits descriptions and export while settings and rewrite controls remain present", () => {
