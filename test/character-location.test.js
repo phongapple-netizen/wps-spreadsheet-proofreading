@@ -6,13 +6,13 @@ const source = fs.readFileSync(require.resolve('../js/wps-et-api.js'), 'utf8');
 
 function host(text = '第1条检查，，内容。。') {
   let now = Date.now(), flag = true, editing = false, draft, blockSettingInEdit = true;
-  let nativeFocused = true, queuedKeys = false, enterDelay = 0, activations = 0;
-  const timers = [], intervals = [], keys = [], storage = new Map();
+  let nativeFocused = true, queuedKeys = false, enterDelay = 0, activations = 0, moveFlag = true;
+  const timers = [], intervals = [], keys = [], storage = new Map(), movements = [];
   const book = { FullName: 'sample.xlsx', Windows: { Item: () => ({ Hwnd: 101 }) } };
   const ranges = {};
   const sheet = { Name: 'Sheet1', CodeName: 'Code1', Index: 1, Parent: book, Range: address => ranges[address] };
   book.Worksheets = { Item: () => sheet };
-  const app = { ActiveWorkbook: book, ActiveSheet: sheet, ActiveWindow: { Activate() { nativeFocused=true; activations++; } },
+  const app = { MoveAfterReturn: true, ActiveWorkbook: book, ActiveSheet: sheet, ActiveWindow: { Activate() { nativeFocused=true; activations++; } },
     PluginStorage: { getItem: key => storage.get(key) || '', setItem: (key, value) => storage.set(key, value) },
     Intersect: (left, right) => left === right ? left : null,
     SendKeys(key) {
@@ -20,13 +20,18 @@ function host(text = '第1条检查，，内容。。') {
       const deliver=()=>{
         if (!nativeFocused) return;
         if (key === '{F2}') editing = true;
-        if (key === '{ENTER}') { editing = false; if (draft !== undefined) ranges.B6.Value2 = draft; }
+        if (key === '{ENTER}') {
+          editing = false; if (draft !== undefined) ranges.B6.Value2 = draft;
+          if (app.MoveAfterReturn !== false) { movements.push('C6'); ranges.C6.Select(); }
+        }
       };
       if (queuedKeys || (key === '{ENTER}' && enterDelay)) timers.push({fn:deliver,at:now+1+(key === '{ENTER}'?enterDelay:0)});
       else deliver();
     }
   };
   Object.defineProperty(app, 'EditDirectlyInCell', { get: () => flag, set: value => { if (!editing || !blockSettingInEdit) flag = value; } });
+  Object.defineProperty(app, 'MoveAfterReturn', { configurable: true, get: () => moveFlag,
+    set: value => { if (!editing) moveFlag = value; } });
   ['A1', 'B6', 'C6'].forEach(address => {
     ranges[address] = { Value2: address === 'B6' ? text : '其他文本', Formula: '', FormulaR1C1: '',
       Address: () => address, Select() { app.ActiveCell = app.Selection = this; } };
@@ -49,7 +54,7 @@ function host(text = '第1条检查，，内容。。') {
     }
     now=deadline;
   }
-  return { api, app, context, keys, storage, ranges, advance, durable,
+  return { api, app, context, keys, storage, ranges, advance, durable, movements,
     blur: () => { nativeFocused=false; }, queueKeys: () => { queuedKeys=true; },
     delayEnter: ms => { enterDelay=ms; }, get activations(){return activations;},
     allowSettingWhileEditing: () => { blockSettingInEdit = false; },
@@ -81,6 +86,62 @@ function mergeTarget(h) {
   h.ranges.B6.Select = () => { h.app.ActiveCell = h.ranges.B6; h.app.Selection = area; };
   return area;
 }
+
+test('Enter commits without moving the cell and restores either original movement preference', async () => {
+  for (const preference of [true, false]) {
+    const h = host(); h.watch(); h.app.MoveAfterReturn = preference; h.delayEnter(1200);
+    h.api.selectCharacters('B6', h.ranges.B6.Value2, 9, 11, h.context); h.advance(300);
+    const pending = h.api.finishCharacterLocation(); h.advance(700);
+    assert.equal(h.app.MoveAfterReturn, false);
+    h.advance(700); assert.equal((await pending).ok, true);
+    assert.deepEqual(h.movements, []);
+    assert.equal(h.app.MoveAfterReturn, preference);
+    assert.equal(h.durable.has('wps_et_move_after_return_restore'), false);
+  }
+});
+
+test('failed editor completion defers blocked preference restoration until native edit exit', async () => {
+  const h = host(); h.watch(); h.delayEnter(5000);
+  h.api.selectCharacters('B6', h.ranges.B6.Value2, 9, 11, h.context); h.advance(300);
+  const pending = h.api.finishCharacterLocation(); h.advance(2600);
+  assert.equal((await pending).ok, false);
+  assert.equal(h.app.MoveAfterReturn, false);
+  assert.equal(h.durable.has('wps_et_move_after_return_restore'), true);
+  h.exit(); h.tick();
+  assert.equal(h.app.MoveAfterReturn, true);
+  assert.equal(h.keys.filter(k => k === '{ENTER}').length, 1);
+});
+
+test('unsupported movement property retains the existing reselect behavior', async () => {
+  const h = host(); h.watch(); delete h.app.MoveAfterReturn;
+  h.api.selectCharacters('B6', h.ranges.B6.Value2, 9, 11, h.context); h.advance(300);
+  const pending = h.api.finishCharacterLocation(); h.advance(700);
+  assert.equal((await pending).ok, true);
+  assert.deepEqual(h.movements, ['C6']);
+  assert.equal(h.app.ActiveCell, h.ranges.B6);
+  assert.equal(h.durable.has('wps_et_move_after_return_restore'), false);
+});
+
+test('background page recovers movement preference after an interrupted pane', () => {
+  const h = host(); h.watch();
+  h.app.MoveAfterReturn = false;
+  h.durable.set('wps_et_move_after_return_restore', JSON.stringify({ value: true, time: Date.now() }));
+  h.app.EditDirectlyInCell = false;
+  h.tick(); assert.equal(h.app.MoveAfterReturn, false);
+  h.advance(3100); h.tick();
+  assert.equal(h.app.MoveAfterReturn, true);
+  assert.equal(h.durable.has('wps_et_move_after_return_restore'), false);
+});
+
+test('movement remains suppressed throughout a long formula edit, then restores on native exit', () => {
+  const h = host(); h.watch();
+  h.api.selectCharacters('B6', h.ranges.B6.Value2, 9, 11, h.context); h.advance(5000); h.tick();
+  assert.equal(h.app.MoveAfterReturn, false);
+  assert.equal(h.durable.has('wps_et_move_after_return_restore'), true);
+  h.exit(); h.tick();
+  assert.equal(h.app.MoveAfterReturn, true);
+  assert.equal(h.durable.has('wps_et_move_after_return_restore'), false);
+});
 
 test('merged anchor accepts exactly its full merge selection and finishes before safe writing', async () => {
   const h = host(); h.watch(); mergeTarget(h);

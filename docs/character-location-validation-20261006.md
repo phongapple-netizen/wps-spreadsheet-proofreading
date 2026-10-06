@@ -66,6 +66,16 @@ Ctrl+Z 能恢复修正前内容、面板同步恢复待处理状态。不过结�
 
 ## 官方资料（参考）
 
+### 切换卡片时避免相邻单元格闪动（待真机验证）
+
+第一轮是在结束公式栏编辑前才临时设置 `MoveAfterReturn=false`。用户真机反馈仍会向下跳动，故第一轮效果未通过。本地 3892 服务已确认在提供试验代码，但不能据此证明已加载窗格或设置实际生效。
+
+第二轮改为在 F2 进入编辑前设置并读回核验；结束后恢复原布尔值。若 WPS 在编辑时禁止恢复，会保留持久记录，等编辑结束后由主页面恢复，不强制退出或丢弃输入。长时间编辑期间不会被后台超时提前恢复。设置不支持时保留原 Enter/重新选择的流程。不改变移动方向，不跳过原值/公式/宿主身份核验；已有其他窗格的恢复记录时不接管。
+
+用户第二轮真机确认：效果已明显改善，基本看不出跳动；要求固化此版本作为后续试验的回退基线。这是用户实测反馈，尚无本轮代理独立测量。
+
+新增自动测试覆盖原设置 true/false、编辑期间禁止设置、长时间编辑、慢速编辑提交、提交超时、属性不支持和独立后台恢复。完整测试 161 项通过。第二轮真机未实测，等待重启加载新窗格和主页面。需测试普通和合并单元格连续切换两卡、定位后修正、失败后恢复原设置。消除 Enter 后移动不代表不再退出/重进编辑，也不代表额外 Undo 步骤已经消除。
+
 - [Application 属性](https://open.wps.cn/documents/app-integration-dev/wps365/client/wpsoffice/jsapi/et/Application/obj)
 - [SendKeys](https://open.wps.cn/documents/app-integration-dev/wps365/client/wpsoffice/jsapi/et/Application/member/SendKeys)
 - [CommandBarControl.SetFocus](https://open.wps.cn/documents/app-integration-dev/wps365/client/wpsoffice/jsapi/kso/CommandBarControl/member/SetFocus)

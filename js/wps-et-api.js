@@ -268,6 +268,7 @@
 
   var CHARACTER_RESTORE = "wps_et_character_location_restore";
   var CHARACTER_WATCH = "wps_et_character_location_watch";
+  var RETURN_RESTORE = "wps_et_move_after_return_restore";
   var characterSession = null, characterSequence = 0, characterFinish = null;
   function characterStorage() {
     try {
@@ -299,9 +300,43 @@
         if (!storage) return;
         storage.setItem(CHARACTER_WATCH, String(Date.now()));
         restoreCharacterSetting();
+        restoreReturnSetting(false);
       } catch (error) { /* retry when ET leaves edit mode */ }
     }
     tick(); root.setInterval(tick, 500);
+  }
+  function restoreReturnSetting(immediate, expected) {
+    try {
+      var saved = root.localStorage && root.localStorage.getItem(RETURN_RESTORE);
+      if (!saved) return;
+      if (expected && saved !== expected) return;
+      var state = JSON.parse(saved);
+      if (typeof state.value !== "boolean" || !Number.isFinite(state.time)) return;
+      if (!immediate) {
+        var storage = characterStorage();
+        if (storage && storage.getItem(CHARACTER_RESTORE) === "true") return;
+        if (getApplication().EditDirectlyInCell !== true && Date.now() - state.time < 3000) return;
+      }
+      var app = getApplication();
+      app.MoveAfterReturn = state.value;
+      if (app.MoveAfterReturn === state.value) root.localStorage.removeItem(RETURN_RESTORE);
+    } catch (error) { /* background watcher retries restoration */ }
+  }
+  function suppressReturnMovement(app) {
+    var saved;
+    try {
+      // Keep the user's global preference recoverable if the pane closes.
+      // Unsupported hosts retain the existing Enter/reselect behavior.
+      if (!root.localStorage || typeof app.MoveAfterReturn !== "boolean") return;
+      restoreReturnSetting(false);
+      if (root.localStorage.getItem(RETURN_RESTORE)) return;
+      saved = JSON.stringify({ value: app.MoveAfterReturn, time: Date.now() });
+      root.localStorage.setItem(RETURN_RESTORE, saved);
+      if (root.localStorage.getItem(RETURN_RESTORE) !== saved) return;
+      app.MoveAfterReturn = false;
+      if (app.MoveAfterReturn !== false) { restoreReturnSetting(true, saved); return; }
+      return saved;
+    } catch (error) { if (saved) restoreReturnSetting(true, saved); }
   }
   function characterSelectionAddress(address, context) {
     try {
@@ -349,8 +384,8 @@
       return Promise.resolve({ ok: false, reason: "请先结束单元格编辑，再继续校对或修正。" });
     }
     characterFinish = new Promise(function (resolve) {
-      var started = Date.now();
-      function done(result) { characterFinish = null; resolve(result); }
+      var started = Date.now(), returnSetting = session.returnSetting;
+      function done(result) { if (returnSetting) restoreReturnSetting(true, returnSetting); characterFinish = null; resolve(result); }
       function check() {
         try {
           restoreCharacterSetting();
@@ -405,8 +440,14 @@
       if (root.localStorage.getItem(CHARACTER_RESTORE) !== "true") return fallback;
       storage.setItem(CHARACTER_RESTORE, "true");
       storage.setItem(CHARACTER_RESTORE + "_since", String(Date.now()));
+      // ET can reject application preference changes once F2 editing starts.
+      // Suppress Enter movement before entering the native formula editor.
+      session.returnSetting = suppressReturnMovement(app);
       app.EditDirectlyInCell = false;
-      if (app.EditDirectlyInCell !== false) { restoreCharacterSetting(); return fallback; }
+      if (app.EditDirectlyInCell !== false) {
+        if (session.returnSetting) restoreReturnSetting(true, session.returnSetting);
+        restoreCharacterSetting(); return fallback;
+      }
       characterSession = session;
       app.ActiveWindow.Activate(); app.SendKeys("{F2}", true);
       root.setTimeout(function () {
