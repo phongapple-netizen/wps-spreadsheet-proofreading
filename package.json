@@ -1,6 +1,6 @@
 {
   "name": "wps-spreadsheet-proofreading",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "private": true,
   "description": "WPS 表格智能文本校改加载项",
   "addonType": "et",
