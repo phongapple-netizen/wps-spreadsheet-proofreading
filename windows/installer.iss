@@ -49,9 +49,23 @@ end;
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   ExitCode: Integer;
+  Locator, Services, Processes: Variant;
 begin
-  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM WPSSpreadsheetProofreadingServer.exe', '', SW_HIDE, ewWaitUntilTerminated, ExitCode);
   Result := '';
+  try
+    Locator := CreateOleObject('WbemScripting.SWbemLocator');
+    Services := Locator.ConnectServer('', 'root\CIMV2');
+    Processes := Services.ExecQuery('SELECT ProcessId FROM Win32_Process WHERE Name = ''wps.exe'' OR Name = ''et.exe'' OR Name = ''wpp.exe''');
+    if Processes.Count > 0 then
+    begin
+      Result := '请保存所有文档并完全退出 WPS（含托盘和后台进程）后重试。';
+      Exit;
+    end;
+  except
+    Result := '无法确认 WPS 是否已退出，安装未继续。请检查系统进程查询是否可用后重试。';
+    Exit;
+  end;
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM WPSSpreadsheetProofreadingServer.exe', '', SW_HIDE, ewWaitUntilTerminated, ExitCode);
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
