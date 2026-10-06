@@ -13,6 +13,19 @@
   function safe(value) { return root.WpsSpreadsheetUtil ? root.WpsSpreadsheetUtil.escapeHtml(value) : String(value == null ? "" : value).replace(/[&<>"']/g, function (c) { return ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" })[c]; }); }
   function integration() { return root.WpsSpreadsheetIntegration; }
   function setStatus(id, state) { var n = $(id); if (!n) return; n.textContent = state && state.text || ""; n.className = "status status-" + ((state && state.tone) || "idle"); }
+  function loadAppVersion() {
+    var node = $("app-version");
+    if (!node || typeof root.fetch !== "function") return Promise.resolve(false);
+    return root.fetch("/package.json", { cache: "no-store" })
+      .then(function (response) { if (!response || !response.ok) throw new Error("version unavailable"); return response.json(); })
+      .then(function (pkg) {
+        var version = pkg && typeof pkg.version === "string" ? pkg.version.trim() : "";
+        if (!version) return false;
+        node.textContent = "WPS 表格校改 · v" + version;
+        return true;
+      })
+      .catch(function () { return false; });
+  }
   function updateModelSummary() {
     var p = $("model-provider").value, model = !$("model-manual-row").hidden ? $("model-name").value.trim() : $("model-suggestions").value;
     text("model-summary", model ? ({ opencode:"OpenCode", ollama:"Ollama", openai:"兼容接口" }[p] + " · " + model) : "尚未选择模型。");
@@ -438,6 +451,6 @@
     } finally { connectionBusy = false; root.setSpreadsheetConnectionBusy(false); }
   }
   function refreshTiming() { var records = integration().getTimingRecords ? integration().getTimingRecords() : []; $("proofreading-timing-log").value = JSON.stringify(records || [], null, 2); }
-  loadSettings(); hydrateProviderProfile(settings); wire(); root.setSpreadsheetIssues([]); root.setSpreadsheetHistory([]);
+  loadSettings(); hydrateProviderProfile(settings); wire(); loadAppVersion(); root.setSpreadsheetIssues([]); root.setSpreadsheetHistory([]);
   if (integration() && integration().startHostTracking) integration().startHostTracking();
 })(typeof window !== "undefined" ? window : globalThis);
