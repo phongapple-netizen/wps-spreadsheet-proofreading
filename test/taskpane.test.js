@@ -111,41 +111,33 @@ function makeRuntime(options = {}) {
     async ensureService() { calls.push(["ensureService"]); },
     async fetchModels() { calls.push(["fetchModels"]); return { models: ["opencode/new"], defaultModel: "opencode/new", detail: "读取成功" }; }
   };
-  const downloads = [];
-  class URLMock extends URL {}
-  URLMock.createObjectURL = blob => { downloads.push(blob); return "blob:test"; };
-  URLMock.revokeObjectURL = () => {};
   const root = {
     document, localStorage, WpsSpreadsheetSettings: settings, WpsSpreadsheetIntegration: integration,
-    WpsSpreadsheetModelClient: client, Blob, URL: URLMock, setTimeout(fn) { fn(); },
+    WpsSpreadsheetModelClient: client, URL, setTimeout(fn) { fn(); },
     location: { origin: "http://localhost:3892" }
   };
   const context = vm.createContext(root);
   vm.runInContext(source, context, { filename: "taskpane.js" });
-  return { root, context, elements, calls, profileStore, downloads, scopeConfirmationRequests };
+  return { root, context, elements, calls, profileStore, scopeConfirmationRequests };
 }
 
 function click(el) { el.dispatch("click"); }
 
-test('workbook changes dismiss pending authorization and identify the current file', async () => {
+test('workbook changes dismiss pending authorization', async () => {
   const {root,elements,scopeConfirmationRequests}=makeRuntime({scope:'sheet'});
   click(elements['run-proofreading']);
   assert.equal(elements['scope-confirmation'].hidden,false);
   root.setSpreadsheetWorkbook({key:'other',name:'另一份.xlsx'});
   assert.equal(await scopeConfirmationRequests[0],false);
   assert.equal(elements['scope-confirmation'].hidden,true);
-  assert.equal(elements['current-workbook'].textContent,'当前文件：另一份.xlsx');
   assert.equal(elements['processed-issues'].open,false);
 });
 
-test('bulk correction explains eligibility when custom or AI suggestions are excluded', () => {
+test('bulk correction remains disabled for custom or AI suggestions', () => {
   const {root,elements}=makeRuntime();
   root.setSpreadsheetIssues([{id:'custom',origin:'rule',status:'pending',needsReview:true,autoFixable:false,original:'原文',suggestion:'修改'}]);
   assert.equal(elements['apply-all'].disabled,true);
-  assert.match(elements['apply-all-hint'].textContent,/自定义规则和 AI 建议需逐条确认/);
   assert.match(html, /id="rule-auto-fix"[^>]*disabled/);
-  assert.match(html, /id="apply-all-hint" class="field-note"/);
-  assert.match(html, /id="current-workbook" class="field-note"/);
 });
 function actionTarget(action, id) {
   return { closest(selector) {
@@ -276,17 +268,6 @@ test("review-only issues are labeled and stale items stay outside processed tota
   assert.equal(elements["result-stale-summary"].textContent, "需重查 1");
   assert.equal(elements["pending-issues"].children.length, 2);
   assert.equal(elements["processed-issues"].hidden, true);
-});
-
-test("export button downloads structured JSON", async () => {
-  const { root, elements, downloads } = makeRuntime();
-  root.setSpreadsheetIssues([{ id: "i", address: "A1", sheetName: "Data", original: "=1+1", suggestion: "text", status: "pending" }]);
-  click(elements["export-results"]);
-  assert.equal(downloads.length, 1);
-  assert.equal(downloads[0].type, "application/json;charset=utf-8");
-  assert.equal(root.document.lastDownload.download, "wps-spreadsheet-proofreading.json");
-  const exported = JSON.parse(await downloads[0].text());
-  assert.equal(exported.issues[0].original, "=1+1");
 });
 
 test("refreshing available models preserves a manually entered model", async () => {
@@ -474,10 +455,10 @@ test("expanded error analysis survives another card update and the unchanged car
   assert.equal(elements["pending-issues"].children[0], bCard);
 });
 
-test("export remains available from the low-frequency results menu and settings and rewrite controls remain present", () => {
+test("footer omits descriptions and export while settings and rewrite controls remain present", () => {
   const { elements, root } = makeRuntime();
   const html = fs.readFileSync(path.join(__dirname, "../ui/taskpane.html"), "utf8");
-  assert.match(html, /<details id="result-more"[\s\S]*id="export-results"/);
+  assert.doesNotMatch(html, /id="(?:result-more|export-results|current-workbook|apply-all-hint)"|class="footer-info"/);
   for (const id of ["model-provider", "model-suggestions", "model-endpoint", "refresh-models", "rules-only", "auto-advance", "proofreading-concurrency", "proofreading-diagnostics-toggle", "app-version"]) assert.ok(elements[id], id);
   for (const id of ["run-rewrite", "replace-rewrite", "regenerate-rewrite", "discard-rewrite", "undo-rewrite"]) assert.ok(elements[id], id);
   root.setSpreadsheetRewrite({ sheetName: "Very long worksheet name", address: "B2", original: "原文", suggestion: "改写", status: "ready", risk: { level: "low", canReplace: true } });
