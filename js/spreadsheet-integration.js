@@ -2,7 +2,7 @@
   "use strict";
 
   var issues = [], history = [], timing = [];
-  var activeRun = null, connectionBusy = false, rewriteState = null, scopeConfirmationHandler = null;
+  var activeRun = null, connectionBusy = false, rewriteState = null, scopeConfirmationHandler = null, locationTransition = false;
   var sequence = 0, lastOptions = null;
   var workbookSessions = Object.create(null), currentWorkbookKey = "", hostTrackingStarted = false;
   var lastStatus = { text: "请选择文本单元格开始校对", tone: "idle" }, nativeUndoStacks = Object.create(null);
@@ -13,7 +13,7 @@
   function client() { return root.WpsSpreadsheetModelClient; }
   function emit(name, payload) { if (typeof root[name] === "function") root[name](payload); }
   function status(text, tone) { lastStatus = { text: text, tone: tone || "idle" }; emit("setSpreadsheetStatus", lastStatus); }
-  function isBusy() { return !!activeRun; }
+  function isBusy() { return !!activeRun || locationTransition; }
   function newId(prefix) { sequence++; return prefix + "-" + sequence; }
   function syncWorkbook() {
     var key = api().getWorkbookKey();
@@ -54,7 +54,7 @@
     stack.recovery = null;
   }
   function checkNativeUndo() {
-    if (isBusy()) return;
+    if (isBusy() || (api().hasCharacterLocation && api().hasCharacterLocation())) return;
     var stack = nativeUndoStacks[currentWorkbookKey];
     if (!stack || !stack.actions.length) return;
     var action = stack.actions[stack.actions.length - 1], values = Object.create(null);
@@ -375,11 +375,17 @@
     else status("正在取消校对…", "working");
     if (activeRun.controller) activeRun.controller.abort();
   }
-  function locate(id) {
+  function locate(id, cellOnly) {
     syncWorkbook();
     if (isBusy()) return;
     var issue = issues.find(function (item) { return item.id === id; }) || history.find(function (item) { return item.id === id; });
-    if (!issue || !api().selectAddress(issue.address, issue.context)) status("无法定位原单元格，请确认原工作簿和工作表仍然打开", "error");
+    if (!cellOnly && issue && issue.status === "pending" && api().selectCharacters) {
+      var result = api().selectCharacters(issue.address, issue.cellOriginal, issue.start, issue.end, issue.context);
+      if (!result.ok) status(result.reason, "error");
+      else if (!result.precise) status("已定位单元格；当前文本或 WPS 环境暂不支持精确选中文字", "warning");
+    } else if (!issue || !api().selectAddress(issue.address, issue.context)) {
+      status("无法定位原单元格，请确认原工作簿和工作表仍然打开", "error");
+    }
   }
   function rebase(key, before, after, start, end, length, acceptedId) {
     var delta = length - (end - start);
@@ -414,7 +420,9 @@
   function advance() {
     if (lastOptions && lastOptions.autoAdvance) {
       var next = issues.find(function (item) { return item.status === "pending"; });
-      if (next) locate(next.id);
+      // Keep native Ctrl+Z available after a correction. Enter the text editor
+      // only for an explicit card click, not automatic next-cell navigation.
+      if (next) locate(next.id, true);
     }
   }
   function apply(id) {
@@ -544,9 +552,28 @@
     } catch (error) { emit("setSpreadsheetConnectionStatus", { text: error.message, tone: "error" }); }
     finally { connectionBusy = false; emit("setSpreadsheetConnectionBusy", false); }
   }
+  function finishThen(operation) {
+    return function () {
+      if (isBusy()) return;
+      var args = arguments, key = api().getWorkbookKey();
+      var pending = api().finishCharacterLocation && api().finishCharacterLocation();
+      if (!pending) return operation.apply(null, args);
+      locationTransition = true; emit("setSpreadsheetBusy", true);
+      return Promise.resolve(pending).then(function (result) {
+        locationTransition = false; emit("setSpreadsheetBusy", false);
+        if (!result.ok || api().getWorkbookKey() !== key) {
+          status(result.reason || "工作簿已切换，请重新选择原单元格", "error"); return false;
+        }
+        return operation.apply(null, args);
+      }, function () {
+        locationTransition = false; emit("setSpreadsheetBusy", false);
+        status("请先结束单元格编辑，再继续校对或修正。", "error"); return false;
+      });
+    };
+  }
   root.WpsSpreadsheetIntegration = {
-    run: run, cancel: cancel, locate: locate, apply: apply, ignore: ignore, applyAll: applyAll, undo: undo,
-    runRewrite: runRewrite, applyRewrite: applyRewrite, undoRewrite: undoRewrite, discardRewrite: discardRewrite, cancelRewrite: cancel,
+    run: finishThen(run), cancel: cancel, locate: finishThen(locate), apply: finishThen(apply), ignore: finishThen(ignore), applyAll: finishThen(applyAll), undo: finishThen(undo),
+    runRewrite: finishThen(runRewrite), applyRewrite: finishThen(applyRewrite), undoRewrite: finishThen(undoRewrite), discardRewrite: finishThen(discardRewrite), cancelRewrite: cancel,
     testConnection: testConnection, readScope: readScope, isBusy: isBusy,
     syncWorkbook: syncWorkbook, startHostTracking: startHostTracking, checkNativeUndo: checkNativeUndo,
     setScopeConfirmationHandler: function (handler) { scopeConfirmationHandler = typeof handler === "function" ? handler : null; },

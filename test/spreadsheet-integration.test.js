@@ -61,6 +61,47 @@ function activateOtherWorkbook(h) {
   return {range, restore(){Object.assign(h.context.Application,{ActiveWorkbook:original.workbook,ActiveSheet:original.sheet,Selection:original.selection});}};
 }
 
+test('finishing character selection waits before writing and retains user edits', async () => {
+  const h=harness(['原文'],async (_,prompt)=>reply(prompt,()=> '修改'));
+  await h.api.run();
+  let finish;
+  h.context.WpsSpreadsheet.finishCharacterLocation=()=>new Promise(resolve=>{finish=resolve;});
+  const pending=h.api.apply(h.issues[0].id);
+  assert.equal(h.api.isBusy(),true);
+  assert.equal(h.ranges[0].Value2,'原文');
+  h.api.apply(h.issues[0].id); // disabled during the editor transition
+  h.ranges[0].Value2='用户手动修改'; finish({ok:true}); await pending;
+  assert.equal(h.ranges[0].Value2,'用户手动修改');
+  assert.equal(h.api.getHistory().length,0);
+  assert.equal(h.api.isBusy(),false);
+  assert.match(h.statuses.at(-1).text,/内容已变化/);
+});
+
+test('workbook changes while finishing an edit never run the queued correction', async () => {
+  const h=harness(['原文'],async (_,prompt)=>reply(prompt,()=> '修改'));
+  await h.api.run();
+  let finish;
+  h.context.WpsSpreadsheet.finishCharacterLocation=()=>new Promise(resolve=>{finish=resolve;});
+  const pending=h.api.apply(h.issues[0].id), other=activateOtherWorkbook(h);
+  finish({ok:true}); await pending;
+  assert.equal(h.ranges[0].Value2,'原文');
+  assert.equal(other.range.Value2,'另一份，，表格。');
+  assert.equal(h.api.getHistory().length,0);
+  assert.match(h.statuses.at(-1).text,/工作簿已切换/);
+});
+
+test('automatic next navigation stays out of edit mode so native Undo remains available', async () => {
+  const h=harness(['原文一','原文二'],async (_,prompt)=>reply(prompt,()=> '修改'));
+  h.context.getSpreadsheetRunOptions=()=>({autoAdvance:true});
+  let characterSelections=0;
+  h.context.WpsSpreadsheet.selectCharacters=()=>{characterSelections++;return {ok:true,precise:true};};
+  await h.api.run(); h.api.locate(h.issues[0].id);
+  assert.equal(characterSelections,1);
+  h.api.apply(h.issues[0].id);
+  assert.equal(characterSelections,1);
+  assert.equal(h.context.Application.Selection,h.ranges[1]);
+});
+
 test('workbook switching restores separate issues and histories without cross-file writes', async () => {
   const h=harness(['原文'],async (_,prompt)=>reply(prompt,()=> '修改'));
   await h.api.run(); const id=h.issues[0].id;
