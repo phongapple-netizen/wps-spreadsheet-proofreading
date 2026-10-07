@@ -2,6 +2,8 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 function loadStore() {
+  global.WpsSpreadsheet = null;
+  global.WpsNativeDocument = null;
   global.localStorage = {
     data: Object.create(null),
     getItem(key) { return this.data[key] || null; },
@@ -141,4 +143,35 @@ test('custom OpenAI-compatible endpoint, model and API key survive reload', () =
   assert.equal(settings.endpoint, 'https://models.example/v1/chat/completions');
   assert.equal(settings.model, 'deepseek-chat');
   assert.equal(settings.apiKey, 'sk-persist-me');
+});
+
+
+test('durable localStorage wins over stale PluginStorage and mirrors new writes to both', () => {
+  const local = {
+    data: Object.create(null),
+    getItem(key) { return this.data[key] || null; },
+    setItem(key, value) { this.data[key] = String(value); },
+    removeItem(key) { delete this.data[key]; }
+  };
+  const pluginValues = Object.create(null);
+  global.localStorage = local;
+  global.WpsSpreadsheet = { getPluginStorage() { return {
+    getItem(key) { return pluginValues[key] || null; },
+    setItem(key, value) { pluginValues[key] = String(value); }
+  };}};
+  local.setItem('wps_spreadsheet_settings_v1', JSON.stringify({
+    provider:'opencode',
+    profiles:{opencode:{endpoint:'http://127.0.0.1:4096',model:'provider/local'}}
+  }));
+  pluginValues.wps_spreadsheet_settings_v1 = JSON.stringify({
+    provider:'opencode',
+    profiles:{opencode:{endpoint:'http://127.0.0.1:4096',model:'provider/stale'}}
+  });
+
+  delete require.cache[require.resolve('../js/settings-store.js')];
+  const store = require('../js/settings-store.js');
+  assert.equal(store.get().model, 'provider/local');
+  store.update({model:'provider/final'});
+  assert.equal(JSON.parse(local.getItem(store.KEY)).profiles.opencode.model, 'provider/final');
+  assert.equal(JSON.parse(pluginValues[store.KEY]).profiles.opencode.model, 'provider/final');
 });
