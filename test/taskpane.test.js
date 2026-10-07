@@ -282,7 +282,7 @@ test("refreshing available models preserves a manually entered model", async () 
   assert.equal(elements["model-name"].value, "custom/model-not-in-list");
 });
 
-test("provider switch reads saved model from WPS PluginStorage before localStorage", () => {
+test("provider switch prefers durable localStorage over stale WPS PluginStorage", () => {
   const { root, context, elements } = makeRuntime();
   const nativeValues = new Map([["wps_spreadsheet_settings_v1", JSON.stringify({
     provider: "opencode", profiles: {
@@ -298,9 +298,9 @@ test("provider switch reads saved model from WPS PluginStorage before localStora
   root.WpsSpreadsheetSettings = root.WpsSpreadsheetSettings;
   elements["model-provider"].value = "openai";
   elements["model-provider"].dispatch("change");
-  assert.equal(elements["model-endpoint"].value, "http://127.0.0.1:4567/v1");
-  assert.equal(elements["model-suggestions"].value, "native-saved-openai-model");
-  assert.equal(root.WpsSpreadsheetSettings.get().model, "native-saved-openai-model");
+  assert.equal(elements["model-endpoint"].value, "https://stale-local.example/v1");
+  assert.equal(elements["model-suggestions"].value, "stale-local-model");
+  assert.equal(root.WpsSpreadsheetSettings.get().model, "stale-local-model");
 });
 
 test("late model response after provider switch cannot populate the new provider", async () => {
