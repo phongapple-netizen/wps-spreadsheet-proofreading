@@ -495,3 +495,26 @@ test("task pane keeps the character-location heartbeat alive while it is open", 
   assert.doesNotThrow(() => makeRuntime({ wpsSpreadsheet: { startCharacterRestoreWatch() { throw new Error("host"); } } }));
   assert.doesNotThrow(() => makeRuntime({}));
 });
+
+test("warns before sending a credential over plain http to a remote endpoint", () => {
+  const { elements } = makeRuntime();
+  const warning = elements["model-endpoint-warning"];
+  const set = (endpoint, key) => {
+    elements["model-endpoint"].value = endpoint; elements["model-api-key"].value = key;
+    elements["model-endpoint"].dispatch("input");
+  };
+  set("http://192.168.1.20:8000/v1", "secret"); assert.equal(warning.hidden, false);
+  set("https://api.example.test/v1", "secret"); assert.equal(warning.hidden, true);
+  set("http://127.0.0.1:4096", "secret"); assert.equal(warning.hidden, true);
+  set("http://192.168.1.20:8000/v1", ""); assert.equal(warning.hidden, true);
+  set("http://192.168.1.20:8000/v1", "secret"); elements["model-provider"].value = "ollama";
+  elements["model-api-key"].dispatch("input"); assert.equal(warning.hidden, true);
+});
+
+test("clearing the credential field removes the saved credential immediately", () => {
+  const { elements, profileStore } = makeRuntime();
+  elements["model-api-key"].value = "";
+  elements["model-api-key"].dispatch("change");
+  assert.equal(profileStore.credentials.opencode.password, "");
+  assert.equal(profileStore.credentials.opencode.apiKey, "");
+});

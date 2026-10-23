@@ -12,7 +12,7 @@ const ROOT = path.resolve(__dirname, '..');
 const HOST = '127.0.0.1';
 const PORT = readPort(process.argv.slice(2));
 const FILES = new Set([
-  'index.html', 'main.js', 'ribbon.xml',
+  'index.html', 'main.js', 'ribbon.xml', 'package.json',
   'js/util.js', 'js/wps-et-api.js', 'js/ribbon.js', 'js/model-client.js', 'js/settings-store.js',
   'js/proofreading-core.js', 'js/spreadsheet-integration.js', 'js/taskpane.js', 'js/rules-center.js', 'js/rules-ui.js',
   'js/text-proofreading-core.js', 'js/rewrite-core.js',

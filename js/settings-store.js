@@ -8,7 +8,6 @@
     ollama: { endpoint: "http://127.0.0.1:11434", model: "" },
     openai: { endpoint: "", model: "" }
   };
-  var runtimeEndpoints = Object.create(null);
   var runtimeCredentials = Object.create(null);
   var memoryStored = null;
   var runtimeCatalogs = Object.create(null);
@@ -79,9 +78,8 @@
     });
     var profile = profiles[provider];
     var savedCredentials = stored.credentials && stored.credentials[provider] || {};
-    var endpoint = runtimeEndpoints[provider] || profile.endpoint;
     return {
-      provider: provider, endpoint: endpoint, model: profile.model,
+      provider: provider, endpoint: profile.endpoint, model: profile.model,
       password: runtimeCredentials[provider] && runtimeCredentials[provider].password ||
         (typeof savedCredentials.password === "string" ? savedCredentials.password : ""),
       apiKey: runtimeCredentials[provider] && runtimeCredentials[provider].apiKey ||
@@ -107,13 +105,10 @@
       };
     });
     var endpoint = patch.endpoint == null
-      ? (provider === old.provider ? old.endpoint : (runtimeEndpoints[provider] || profiles[provider].endpoint))
+      ? (provider === old.provider ? old.endpoint : profiles[provider].endpoint)
       : String(patch.endpoint).trim();
     var safe = validEndpoint(endpoint);
-    if (safe) {
-      profiles[provider].endpoint = safe;
-      delete runtimeEndpoints[provider];
-    }
+    if (safe) profiles[provider].endpoint = safe;
     var model = patch.model == null
       ? (provider === old.provider ? old.model : profiles[provider].model)
       : String(patch.model).trim();

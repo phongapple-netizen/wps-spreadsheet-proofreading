@@ -307,11 +307,18 @@
     if (settings.model) { var option = root.document.createElement("option"); option.value = settings.model; option.textContent = settings.model; $("model-suggestions").appendChild(option); $("model-suggestions").value = settings.model; $("model-name").value = settings.model; }
     providerChanged();
   }
+  function updateEndpointWarning() {
+    var url = null;
+    try { url = new URL($("model-endpoint").value.trim()); } catch (error) { /* not a URL yet */ }
+    var remote = !!url && url.protocol === "http:" && ["127.0.0.1", "localhost", "[::1]", "::1"].indexOf(url.hostname) < 0;
+    $("model-endpoint-warning").hidden = !(remote && $("model-provider").value !== "ollama" && $("model-api-key").value);
+  }
   var lastProvider = "", providerRevision = 0;
   function hydrateProviderProfile(profile) {
     profile = profile || {};
     $("model-endpoint").value = profile.endpoint || "";
     $("model-api-key").value = profile.password || profile.apiKey || "";
+    updateEndpointWarning();
     var cached = root.WpsSpreadsheetSettings && root.WpsSpreadsheetSettings.loadCatalog ? root.WpsSpreadsheetSettings.loadCatalog($("model-provider").value, profile.endpoint) : [];
     populateModels(cached, profile.model);
     text("model-detection-result", cached.length ? "缓存 " + cached.length + " 个模型；需重新检测" : "尚未检测");
@@ -348,7 +355,7 @@
     $("model-api-key-row").hidden = p === "ollama";
     $("opencode-service-state").hidden = p !== "opencode"; $("opencode-start-guide").hidden = p !== "opencode";
     text("provider-help", p === "openai" ? "兼容接口需提供地址、模型名和可选 API Key。" : p === "ollama" ? "连接本机 Ollama；请先在本机下载模型。" : "打开设置会检测已运行的服务并读取模型。点击“检测并读取模型”可重试；校对文本只在开始校对后发送。");
-    updateModelSummary();
+    updateModelSummary(); updateEndpointWarning();
     if (!previous && root.WpsSpreadsheetSettings && root.WpsSpreadsheetSettings.update) settings = Object.assign({}, settings, root.WpsSpreadsheetSettings.update({ provider: p }));
   }
   function wire() {
@@ -394,7 +401,7 @@
     $("deep-enhance-control").addEventListener("change", function () { persist({ deep: $("deep-enhance").checked }); });
     ["rules-only","auto-advance","proofreading-timing-enabled"].forEach(function (id) { $(id).addEventListener("change", function () { var k = {"rules-only":"rulesOnly","auto-advance":"autoAdvance","proofreading-timing-enabled":"timingLogs"}[id]; persist((function(){var o={};o[k]=$(id).checked;return o;})()); if (id === "rules-only") updateModelSummary(); }); });
     $("proofreading-concurrency").addEventListener("change", function () { persist({ concurrency:Number($("proofreading-concurrency").value) }); });
-    $("model-provider").addEventListener("change", providerChanged); $("model-endpoint").addEventListener("change", function () { persist({ endpoint: $("model-endpoint").value.trim() }); }); $("model-name").addEventListener("change", function () { persist({ model: $("model-name").value.trim() }); updateModelSummary(); });
+    $("model-provider").addEventListener("change", providerChanged); $("model-endpoint").addEventListener("change", function () { persist({ endpoint: $("model-endpoint").value.trim() }); }); $("model-endpoint").addEventListener("input", updateEndpointWarning); $("model-api-key").addEventListener("input", updateEndpointWarning); $("model-api-key").addEventListener("change", function () { var value = $("model-api-key").value; persist({ password: value, apiKey: value }); }); $("model-name").addEventListener("change", function () { persist({ model: $("model-name").value.trim() }); updateModelSummary(); });
     $("model-input-toggle").addEventListener("click", function () { var manual = $("model-manual-row").hidden; $("model-manual-row").hidden = !manual; $("model-select-row").hidden = manual; $("model-input-toggle").setAttribute("aria-pressed", String(manual)); });
     $("model-suggestions").addEventListener("change", function () { persist({ model: $("model-suggestions").value }); updateModelSummary(); });
     $("refresh-models").addEventListener("click", function () { refreshModels(true); }); $("test-connection").addEventListener("click", function () { integration().testConnection(getModelOptions()); });

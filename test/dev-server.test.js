@@ -21,9 +21,12 @@ function request(handler, method, url, headers = {}) {
 test('dev server serves only allowlisted project files and guards service startup', async () => {
   const handler = createHandler();
   assert.ok(FILES.has('index.html'));
+  // The task pane reads its version from /package.json, as the installed servers serve it.
+  assert.ok(FILES.has('package.json'));
   assert.equal((await request(handler, 'GET', '/index.html')).status, 200);
-  assert.equal((await request(handler, 'GET', '/package.json')).status, 404);
-  assert.equal((await request(handler, 'GET', '/%2e%2e/package.json')).status, 404);
+  assert.equal((await request(handler, 'GET', '/package.json')).status, 200);
+  assert.equal((await request(handler, 'GET', '/package-lock.json')).status, 404);
+  assert.equal((await request(handler, 'GET', '/%2e%2e/package-lock.json')).status, 404);
   assert.equal((await request(handler, 'POST', '/api/opencode/start', { origin: 'https://evil.example' })).status, 403);
   assert.equal((await request(handler, 'GET', '/api/opencode/start')).status, 405);
 });

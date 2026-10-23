@@ -521,6 +521,10 @@ h2 {
     color: var(--warning);
 }
 
+.endpoint-warning {
+    color: var(--warning);
+}
+
 .status-error {
     background: #fff0f0;
     color: var(--error);

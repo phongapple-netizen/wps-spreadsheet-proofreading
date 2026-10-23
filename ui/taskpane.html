@@ -347,6 +347,7 @@
                     <label id="model-endpoint-label" class="field-label" for="model-endpoint">OpenCode 服务地址</label>
                     <input id="model-endpoint" class="field-control" type="url" value="http://127.0.0.1:4096"
                            placeholder="http://127.0.0.1:4096" autocomplete="off" spellcheck="false">
+                    <p id="model-endpoint-warning" class="field-note endpoint-warning" role="status" hidden>该地址使用未加密的 http，API Key 或密码会以明文经网络发送；建议改用 https 地址。</p>
 
                     <div class="model-label-row"><label id="model-name-label" class="field-label" for="model-suggestions">模型</label><button id="model-input-toggle" class="button button-text" type="button" aria-pressed="false">手动输入</button></div>
                     <div id="model-select-row"><select id="model-suggestions" class="field-control" aria-label="从已检测模型中选择">
@@ -393,7 +394,7 @@
                             <p id="proofreading-timing-status" class="field-note" role="status" aria-live="polite"></p>
                         </div>
                     </div>
-                    <p class="field-note">服务类型、模型名、兼容接口地址、API 密钥和服务密码都会保存在本机。</p>
+                    <p class="field-note">服务类型、模型名、兼容接口地址、API 密钥和服务密码都会以明文保存在本机。</p>
                     <p id="app-version" class="field-note" aria-label="插件版本">WPS 表格校改</p>
                 </div>
             </div>
