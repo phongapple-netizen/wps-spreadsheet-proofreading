@@ -864,3 +864,18 @@ test('rewrite preview blocks changed numeric facts and supports replacing and un
   h.api.applyRewrite({riskConfirmed:true});
   assert.equal(h.ranges[0].Value2,'检查了10个单位。');
 });
+
+test('locating while a run is active explains why the card did nothing', async () => {
+  let release;
+  const h = harness(['原文'],async (_,prompt)=>new Promise(resolve=>{release=()=>resolve(reply(prompt,()=> '修改'));}));
+  let selections=0;
+  h.context.WpsSpreadsheet.selectCharacters=()=>{selections++;return {ok:true,precise:true};};
+  const running=h.api.run();
+  while (!release) await Promise.resolve();
+  h.api.locate('issue-any');
+  assert.equal(selections,0);
+  assert.equal(h.statuses.at(-1).text,'校对进行中，请等待完成或取消后再定位'); assert.equal(h.statuses.at(-1).tone,'warning');
+  release(); await running;
+  h.api.locate(h.issues[0].id);
+  assert.equal(selections,1);
+});

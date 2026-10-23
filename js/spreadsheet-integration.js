@@ -552,9 +552,13 @@
     } catch (error) { emit("setSpreadsheetConnectionStatus", { text: error.message, tone: "error" }); }
     finally { connectionBusy = false; emit("setSpreadsheetConnectionBusy", false); }
   }
-  function finishThen(operation) {
+  function finishThen(operation, busyHint) {
     return function () {
-      if (isBusy()) return;
+      if (isBusy()) {
+        // Card clicks are not disabled while busy; say why nothing happened.
+        if (busyHint) status(locationTransition ? "正在结束上一次定位，请稍候再试" : activeRun && activeRun.mode === "rewrite" ? "正在生成改写，请完成或取消后再定位" : busyHint, "warning");
+        return;
+      }
       var args = arguments, key = api().getWorkbookKey();
       var pending = api().finishCharacterLocation && api().finishCharacterLocation();
       if (!pending) return operation.apply(null, args);
@@ -572,7 +576,7 @@
     };
   }
   root.WpsSpreadsheetIntegration = {
-    run: finishThen(run), cancel: cancel, locate: finishThen(locate), apply: finishThen(apply), ignore: finishThen(ignore), applyAll: finishThen(applyAll), undo: finishThen(undo),
+    run: finishThen(run), cancel: cancel, locate: finishThen(locate, "校对进行中，请等待完成或取消后再定位"), apply: finishThen(apply), ignore: finishThen(ignore), applyAll: finishThen(applyAll), undo: finishThen(undo),
     runRewrite: finishThen(runRewrite), applyRewrite: finishThen(applyRewrite), undoRewrite: finishThen(undoRewrite), discardRewrite: finishThen(discardRewrite), cancelRewrite: cancel,
     testConnection: testConnection, readScope: readScope, isBusy: isBusy,
     syncWorkbook: syncWorkbook, startHostTracking: startHostTracking, checkNativeUndo: checkNativeUndo,

@@ -115,7 +115,7 @@ function makeRuntime(options = {}) {
     document, localStorage, WpsSpreadsheetSettings: settings, WpsSpreadsheetIntegration: integration,
     WpsSpreadsheetModelClient: client, URL, setTimeout(fn) { fn(); },
     location: { origin: "http://localhost:3892" },
-    fetch: options.fetch
+    fetch: options.fetch, WpsSpreadsheet: options.wpsSpreadsheet
   };
   const context = vm.createContext(root);
   vm.runInContext(source, context, { filename: "taskpane.js" });
@@ -486,4 +486,12 @@ test("scope, cards, settings and menus include narrow-pane layout safeguards", (
   assert.match(css, /\.cell-sheet[\s\S]*?text-overflow:\s*ellipsis/);
   assert.match(css, /\.issue-preview[\s\S]*?overflow-wrap:\s*anywhere/);
   assert.match(css, /\.result-footer[\s\S]*?minmax\(0, 1fr\)/);
+});
+
+test("task pane keeps the character-location heartbeat alive while it is open", () => {
+  let started = 0;
+  makeRuntime({ wpsSpreadsheet: { startCharacterRestoreWatch() { started++; } } });
+  assert.equal(started, 1);
+  assert.doesNotThrow(() => makeRuntime({ wpsSpreadsheet: { startCharacterRestoreWatch() { throw new Error("host"); } } }));
+  assert.doesNotThrow(() => makeRuntime({}));
 });

@@ -310,3 +310,14 @@ test('manual editor exit then integration correction writes safely without neigh
   assert.deepEqual(h.movements, []);
   assert.equal(h.app.MoveAfterReturn, true);
 });
+
+test('a pane heartbeat keeps precise location when the hidden ribbon timer is throttled', () => {
+  const h = host(); h.watch();
+  // The ribbon page last ticked long ago; only the visible pane is still running.
+  h.advance(60000);
+  assert.equal(h.api.selectCharacters('B6', h.ranges.B6.Value2, 9, 11, h.context).precise, false);
+  h.api.startCharacterRestoreWatch();
+  assert.equal(h.api.selectCharacters('B6', h.ranges.B6.Value2, 9, 11, h.context).precise, true);
+  h.advance(300); assert.deepEqual(h.keys, ['{F2}', '^{HOME}{RIGHT 9}+{RIGHT 2}']);
+  h.advance(300); h.exit(); h.tick(); assert.equal(h.app.EditDirectlyInCell, true);
+});

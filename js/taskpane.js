@@ -453,4 +453,9 @@
   function refreshTiming() { var records = integration().getTimingRecords ? integration().getTimingRecords() : []; $("proofreading-timing-log").value = JSON.stringify(records || [], null, 2); }
   loadSettings(); hydrateProviderProfile(settings); wire(); loadAppVersion(); root.setSpreadsheetIssues([]); root.setSpreadsheetHistory([]);
   if (integration() && integration().startHostTracking) integration().startHostTracking();
+  // The ribbon page's timers can be throttled while it stays hidden, letting the
+  // character-location heartbeat go stale. The visible pane keeps it fresh too.
+  if (root.WpsSpreadsheet && root.WpsSpreadsheet.startCharacterRestoreWatch) {
+    try { root.WpsSpreadsheet.startCharacterRestoreWatch(); } catch (error) { /* ribbon page remains the fallback */ }
+  }
 })(typeof window !== "undefined" ? window : globalThis);
