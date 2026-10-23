@@ -1,0 +1,2 @@
+# gofmt requires LF; keep Go sources LF on Windows checkouts too.
+*.go text eol=lf
