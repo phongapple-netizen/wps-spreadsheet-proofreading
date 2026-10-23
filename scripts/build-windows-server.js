@@ -22,6 +22,11 @@ try {
         fs.cpSync(path.join(root, name), path.join(staging, "assets", name), { recursive: true });
     }
     if (process.argv.includes("--test")) {
+        const format = spawnSync("gofmt", ["-l", "."], { cwd: staging, encoding: "utf8" });
+        if (format.error) throw format.error;
+        if (format.status !== 0 || format.stdout.trim()) {
+            throw new Error("Go files need gofmt:\n" + (format.stdout || format.stderr));
+        }
         const result = spawnSync("go", ["test", "./..."], { cwd: staging, stdio: "inherit" });
         if (result.error) throw result.error;
         if (result.status !== 0) process.exitCode = result.status || 1;

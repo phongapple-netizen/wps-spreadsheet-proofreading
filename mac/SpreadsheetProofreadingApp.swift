@@ -566,6 +566,10 @@ private enum OpenCodeProxy {
             lock.lock(); let current = sessions[route.id]; lock.unlock()
             guard current == identity else { return Result(status: 403, data: json(["error":"Session does not belong to this panel"])) }
         }
+        if create {
+            lock.lock(); let full = sessions.count >= 1000; lock.unlock()
+            if full { return Result(status: 502, data: json(["error":"Too many active sessions"])) }
+        }
 
         var outgoing: Data? = nil
         if create {

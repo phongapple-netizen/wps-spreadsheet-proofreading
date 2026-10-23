@@ -34,7 +34,8 @@ const (
 	defaultXML = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<jsplugins>\n</jsplugins>\n"
 )
 
-var pluginPattern = regexp.MustCompile(`(?is)\s*<jspluginonline\b[^>]*\bname\s*=\s*["']wps-spreadsheet-proofreading["'][^>]*/>`)
+// Match both the self-closing entry and an expanded <jspluginonline ...></jspluginonline> pair.
+var pluginPattern = regexp.MustCompile(`(?is)\s*<jspluginonline\b[^>]*\bname\s*=\s*["']wps-spreadsheet-proofreading["'][^>]*?(?:/\s*>|>.*?</jspluginonline\s*>)`)
 
 func publishPath() (string, error) {
 	appData := os.Getenv("APPDATA")
